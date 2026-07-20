@@ -1,0 +1,15 @@
+services:
+  backend:
+    build: {context: ./backend, target: runtime}
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    environment: {ENVIRONMENT: development, COOKIE_SECURE: "false"}
+    volumes: ["./backend/app:/app/app:ro", "./backend/migrations:/app/migrations:ro"]
+    ports: ["8000:8000"]
+    read_only: false
+  frontend:
+    build: {context: ./frontend, target: builder}
+    command: npm run dev
+    volumes: ["./frontend/src:/app/src:ro"]
+    ports: ["5173:5173"]
+    read_only: false
+

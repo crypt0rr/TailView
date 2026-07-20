@@ -1,0 +1,17 @@
+services:
+  backend:
+    environment:
+      ENVIRONMENT: test
+      DEMO_MODE: "true"
+      COOKIE_SECURE: "false"
+  e2e:
+    build: {context: ./frontend, target: e2e}
+    command: npm run test:e2e
+    environment:
+      PLAYWRIGHT_BASE_URL: http://frontend:8080
+      E2E_SETUP_TOKEN: ${TAILVIEW_SETUP_TOKEN}
+      E2E_USERNAME: e2e-admin
+      E2E_PASSWORD: e2e-temporary-password-2026
+    depends_on:
+      frontend: {condition: service_healthy}
+    networks: [app]

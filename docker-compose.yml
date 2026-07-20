@@ -1,0 +1,105 @@
+name: tailview
+services:
+  database:
+    image: postgres:17.5-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tailview}
+      POSTGRES_USER: ${POSTGRES_USER:-tailview}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - tailview-db:/var/lib/postgresql/data
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    shm_size: 128mb
+    mem_limit: 1g
+    cpus: 1.0
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    init: true
+    environment:
+      ENVIRONMENT: production
+      APP_URL: ${APP_URL:-http://localhost:8080}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tailview}:${POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB:-tailview}
+      TAILVIEW_SETUP_TOKEN: ${TAILVIEW_SETUP_TOKEN:?Set TAILVIEW_SETUP_TOKEN in .env}
+      TAILVIEW_ENCRYPTION_KEY: ${TAILVIEW_ENCRYPTION_KEY:?Set TAILVIEW_ENCRYPTION_KEY in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      DEMO_MODE: ${DEMO_MODE:-false}
+      TAILSCALE_TAILNET: ${TAILSCALE_TAILNET:-}
+      TAILSCALE_API_TOKEN: ${TAILSCALE_API_TOKEN:-}
+      TAILSCALE_OAUTH_CLIENT_ID: ${TAILSCALE_OAUTH_CLIENT_ID:-}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${TAILSCALE_OAUTH_CLIENT_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-*}
+    depends_on:
+      database: {condition: service_healthy}
+    networks: [data, app]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 1g
+    cpus: 1.0
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    init: true
+    ports: ["${TAILVIEW_PORT:-8080}:8080"]
+    depends_on:
+      backend: {condition: service_healthy}
+    networks: [app]
+    read_only: true
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 256m
+    cpus: 0.5
+
+  caddy:
+    image: caddy:2.10.0-alpine
+    profiles: [caddy]
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment: {APP_DOMAIN: "${APP_DOMAIN:-localhost}"}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [app]
+    depends_on:
+      frontend: {condition: service_healthy}
+    security_opt: ["no-new-privileges:true"]
+
+  telemetry-agent:
+    build: ./deploy/telemetry-agent
+    profiles: [telemetry]
+    restart: unless-stopped
+    environment:
+      TAILVIEW_BACKEND_URL: http://backend:8000
+      TAILVIEW_TELEMETRY_SECRET: ${TAILVIEW_TELEMETRY_SECRET:-}
+      TELEMETRY_INTERVAL_SECONDS: ${TELEMETRY_INTERVAL_SECONDS:-60}
+    volumes:
+      - ${TAILSCALE_SOCKET_PATH:-/var/run/tailscale/tailscaled.sock}:/var/run/tailscale/tailscaled.sock:ro
+    networks: [app]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+volumes:
+  tailview-db:
+  caddy-data:
+  caddy-config:
+networks:
+  app: {internal: false}
+  data: {internal: true}
