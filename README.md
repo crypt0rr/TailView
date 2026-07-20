@@ -44,6 +44,8 @@ Scope names and endpoints are checked against the current official API before ea
 
 Network Flow Logs must be enabled separately and require an eligible Tailscale plan. TailView does not enable logging or Destination Logging.
 
+Set `TAILSCALE_TAILNET=-` to use the tailnet owned by the OAuth credential, or use the Tailnet ID shown in Tailscale Admin Console → General. A `*.ts.net` MagicDNS name is not the API Tailnet ID.
+
 ## Development and tests
 
 ```bash
