@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +27,8 @@ from .models import (
 from .policy import parse_policy
 from .security import SecretBox
 from .tailscale import TailscaleClient, TailscaleError, capability_status
+
+log = structlog.get_logger()
 
 
 def parse_time(value: Any) -> datetime | None:
@@ -270,6 +274,24 @@ def split_endpoint(value: str) -> tuple[str, int | None]:
     return host.strip("[]"), int(port) if port.isdigit() else None
 
 
+def build_address_index(rows: Iterable[tuple[str, list[str]]]) -> dict[str, str]:
+    """Map unambiguous synchronized addresses to device IDs.
+
+    Duplicate addresses are deliberately omitted rather than guessed.
+    """
+    index: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for device_id, addresses in rows:
+        for address in addresses:
+            if address in index and index[address] != device_id:
+                ambiguous.add(address)
+            else:
+                index[address] = device_id
+    for address in ambiguous:
+        index.pop(address, None)
+    return index
+
+
 async def sync_logs(kind: str) -> None:
     settings = get_settings()
     key = 81003 if kind == "flows" else 81004
@@ -279,6 +301,7 @@ async def sync_logs(kind: str) -> None:
         job = SyncJob(kind=kind, status="running")
         session.add(job)
         await session.commit()
+        job_id = job.id
         client = await client_for(session, settings)
         if not client:
             job.status = "skipped"
@@ -313,6 +336,10 @@ async def sync_logs(kind: str) -> None:
                     )
                     processed += 1
             else:
+                device_rows = (await session.execute(select(Device.id, Device.addresses))).all()
+                address_index = build_address_index(
+                    (device_id, addresses) for device_id, addresses in device_rows
+                )
                 for message in logs:
                     for category in ("virtual", "subnet", "exit", "physical"):
                         for count in message.get(f"{category}Traffic", []) or []:
@@ -333,20 +360,8 @@ async def sync_logs(kind: str) -> None:
                                 continue
                             src, src_port = split_endpoint(str(count.get("src", "")))
                             dst, dst_port = split_endpoint(str(count.get("dst", "")))
-                            src_device = (
-                                await session.scalar(
-                                    select(Device.id).where(Device.addresses.contains([src]))
-                                )
-                                if src
-                                else None
-                            )
-                            dst_device = (
-                                await session.scalar(
-                                    select(Device.id).where(Device.addresses.contains([dst]))
-                                )
-                                if dst
-                                else None
-                            )
+                            src_device = address_index.get(src)
+                            dst_device = address_index.get(dst)
                             session.add(
                                 Flow(
                                     fingerprint=fingerprint,
@@ -375,6 +390,16 @@ async def sync_logs(kind: str) -> None:
         except TailscaleError as exc:
             job.status = "failed"
             job.error = f"Upstream returned HTTP {exc.status}"
+        except Exception as exc:
+            await session.rollback()
+            persisted_job = await session.get(SyncJob, job_id)
+            if persisted_job is None:
+                persisted_job = SyncJob(id=job_id, kind=kind, status="failed")
+                session.add(persisted_job)
+            job = persisted_job
+            job.status = "failed"
+            job.error = f"Ingestion failed ({type(exc).__name__})"
+            log.exception("sync_ingestion_failed", kind=kind, error_type=type(exc).__name__)
         finally:
             job.finished_at = datetime.now(UTC)
             await session.commit()
