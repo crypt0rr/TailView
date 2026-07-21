@@ -1,5 +1,8 @@
 services:
+  database:
+    container_name: tailview-dev-postgres
   backend:
+    container_name: tailview-dev-api
     build: {context: ./backend, target: runtime}
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     environment: {ENVIRONMENT: development, COOKIE_SECURE: "false"}
@@ -7,9 +10,13 @@ services:
     ports: ["8000:8000"]
     read_only: false
   frontend:
+    container_name: tailview-dev-web
     build: {context: ./frontend, target: builder}
     command: npm run dev
     volumes: ["./frontend/src:/app/src:ro"]
     ports: ["5173:5173"]
     read_only: false
-
+  caddy:
+    container_name: tailview-dev-proxy
+  telemetry-agent:
+    container_name: tailview-dev-telemetry

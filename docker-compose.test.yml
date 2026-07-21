@@ -1,10 +1,20 @@
 services:
+  database:
+    container_name: tailview-test-postgres
   backend:
+    container_name: tailview-test-api
     environment:
       ENVIRONMENT: test
       DEMO_MODE: "true"
       COOKIE_SECURE: "false"
+  frontend:
+    container_name: tailview-test-web
+  caddy:
+    container_name: tailview-test-proxy
+  telemetry-agent:
+    container_name: tailview-test-telemetry
   e2e:
+    container_name: tailview-test-e2e
     build: {context: ./frontend, target: e2e}
     command: npm run test:e2e
     environment:
