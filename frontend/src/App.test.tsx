@@ -1,6 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
+import { Shell } from "./App";
+import { api } from "./api";
 import {
   AddressInventoryView,
   DeviceTrafficRanking,
@@ -18,6 +22,38 @@ import type { AddressInventory, Device } from "./types";
 describe("TailView", () => {
   it("keeps the product name stable", () => {
     expect("TailView").toMatch(/TailView/);
+  });
+
+  it("leaves the authenticated shell after logout", async () => {
+    const logout = vi.spyOn(api, "logout").mockResolvedValue(undefined);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    function LogoutHarness() {
+      const [signedIn, setSignedIn] = useState(true);
+      if (!signedIn) return <div>Welcome back</div>;
+      return (
+        <Shell
+          user={{ id: "admin", username: "admin", role: "administrator" }}
+          onLogout={() => setSignedIn(false)}
+        />
+      );
+    }
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <TimeRangeProvider>
+            <LogoutHarness />
+          </TimeRangeProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByTitle("Log out"));
+    await waitFor(() => expect(screen.getByText("Welcome back")).toBeTruthy());
+    expect(logout).toHaveBeenCalledOnce();
+    logout.mockRestore();
   });
 
   it("opens device details from the inventory table instead of navigating", () => {

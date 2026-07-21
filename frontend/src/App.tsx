@@ -237,7 +237,13 @@ function Logo() {
   );
 }
 
-function Shell({ user }: { user: CurrentUser }) {
+export function Shell({
+  user,
+  onLogout,
+}: {
+  user: CurrentUser;
+  onLogout: () => void;
+}) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobile, setMobile] = useState(false);
   const [dark, setDark] = useState(() => localStorage.theme !== "light");
@@ -250,9 +256,16 @@ function Shell({ user }: { user: CurrentUser }) {
     localStorage.theme = dark ? "dark" : "light";
   }, [dark]);
   const logout = async () => {
-    await api.logout();
+    try {
+      await api.logout();
+    } catch (error) {
+      // An expired/revoked session is already logged out from the server's
+      // perspective, so it should still complete the local sign-out flow.
+      if (!(error instanceof ApiError && error.status === 401)) throw error;
+    }
     qc.clear();
-    navigate("/");
+    onLogout();
+    navigate("/", { replace: true });
   };
   const active =
     nav.find(([, path]) => path === location.pathname)?.[0] ?? "TailView";
@@ -429,6 +442,7 @@ function CommandPalette() {
 }
 
 export default function App() {
+  const [loggedOut, setLoggedOut] = useState(false);
   const setup = useQuery({ queryKey: ["setup"], queryFn: api.setupStatus });
   const me = useQuery({
     queryKey: ["me"],
@@ -454,9 +468,15 @@ export default function App() {
       />
     );
   if (me.isLoading) return <Loading />;
-  if (me.error instanceof ApiError && me.error.status === 401)
+  if (loggedOut || (me.error instanceof ApiError && me.error.status === 401))
     return (
-      <Login onDone={() => void qc.invalidateQueries({ queryKey: ["me"] })} />
+      <Login
+        onDone={() => {
+          void qc
+            .fetchQuery({ queryKey: ["me"], queryFn: api.me })
+            .then(() => setLoggedOut(false));
+        }}
+      />
     );
   if (me.error)
     return (
@@ -464,5 +484,5 @@ export default function App() {
         Unable to load your session.<small>{me.error.message}</small>
       </div>
     );
-  return <Shell user={me.data!} />;
+  return <Shell user={me.data!} onLogout={() => setLoggedOut(true)} />;
 }
