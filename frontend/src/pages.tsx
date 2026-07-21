@@ -85,12 +85,7 @@ export function Dashboard() {
   if (query.isLoading) return <Loading />;
   if (query.error) return <ErrorState error={query.error} />;
   const d = query.data!;
-  const cards = [
-    ["Total nodes", d.devices, Network, "All registered devices"],
-    ["Online", d.online, Zap, "API-reported state"],
-    ["Users", d.users, Users, "Tailnet identities"],
-    ["Expiring keys", d.expiring_keys, KeyRound, "Within 14 days"],
-  ];
+  const cards = dashboardMetricCards(d);
   return (
     <div className="page">
       <PageHead
@@ -99,16 +94,23 @@ export function Dashboard() {
         description="A concise view of inventory health, reported traffic, and access posture."
       />
       <div className="metric-grid">
-        {cards.map(([label, value, Icon, detail], i) => (
-          <Card key={String(label)} className="metric-card">
-            <div className={`metric-icon c${i}`}>
-              <Icon />
-            </div>
-            <span>{label}</span>
-            <strong>{value}</strong>
-            <small>{detail}</small>
-            <i className="metric-rule" />
-          </Card>
+        {cards.map(({ label, value, Icon, detail, href }, i) => (
+          <Link
+            key={label}
+            className="metric-link"
+            to={href}
+            aria-label={`View ${label.toLowerCase()}`}
+          >
+            <Card className="metric-card">
+              <div className={`metric-icon c${i}`}>
+                <Icon />
+              </div>
+              <span>{label}</span>
+              <strong>{value}</strong>
+              <small>{detail}</small>
+              <i className="metric-rule" />
+            </Card>
+          </Link>
         ))}
       </div>
       <div className="dashboard-grid">
@@ -205,6 +207,15 @@ export function Dashboard() {
   );
 }
 
+export function dashboardMetricCards(d: Record<string, any>) {
+  return [
+    { label: "Total nodes", value: d.devices, Icon: Network, detail: "All registered devices", href: "/devices" },
+    { label: "Online", value: d.online, Icon: Zap, detail: "API-reported state", href: "/devices?status=online" },
+    { label: "Users", value: d.users, Icon: Users, detail: "Tailnet identities", href: "/users" },
+    { label: "Expiring keys", value: d.expiring_keys, Icon: KeyRound, detail: "Within 14 days", href: "/devices?key_expiry=within_14_days" },
+  ];
+}
+
 export function TrafficChart({
   data,
 }: {
@@ -294,6 +305,7 @@ export function Devices({ role = "" }: { role?: string }) {
   const [search, setSearch] = useState(searchParams.get("search") ?? "");
   const [statusFilter, setStatusFilter] = useState(searchParams.get("status") ?? "");
   const [owner, setOwner] = useState(searchParams.get("owner") ?? "");
+  const [keyExpiryFilter, setKeyExpiryFilter] = useState(searchParams.get("key_expiry") ?? "");
   const [showColumns, setShowColumns] = useState(false);
   const [columns, setColumns] = useState<Record<string, boolean>>(() => {
     try {
@@ -308,10 +320,11 @@ export function Devices({ role = "" }: { role?: string }) {
     const params = new URLSearchParams({ search, role });
     if (statusFilter) params.set("status", statusFilter);
     if (owner) params.set("owner", owner);
+    if (keyExpiryFilter) params.set("key_expiry", keyExpiryFilter);
     return params;
-  }, [owner, role, search, statusFilter]);
+  }, [keyExpiryFilter, owner, role, search, statusFilter]);
   const query = useInfiniteQuery({
-    queryKey: ["devices", search, role, statusFilter, owner],
+    queryKey: ["devices", search, role, statusFilter, owner, keyExpiryFilter],
     queryFn: ({ pageParam }) => {
       const params = new URLSearchParams(deviceParams);
       if (pageParam) params.set("cursor", pageParam);
@@ -368,6 +381,10 @@ export function Devices({ role = "" }: { role?: string }) {
     setOwner(value);
     updateParams({ owner: value || null });
   };
+  const setDeviceKeyExpiry = (value: string) => {
+    setKeyExpiryFilter(value);
+    updateParams({ key_expiry: value || null });
+  };
   const toggleColumn = (column: string) => {
     const next = { ...columns, [column]: columns[column] === false };
     setColumns(next);
@@ -406,6 +423,17 @@ export function Devices({ role = "" }: { role?: string }) {
             <option value="offline">Offline</option>
             <option value="unknown">Not reported</option>
           </select>
+          <select
+            aria-label="Device key expiry filter"
+            value={keyExpiryFilter}
+            onChange={(event) => setDeviceKeyExpiry(event.target.value)}
+          >
+            <option value="">All key expiry states</option>
+            <option value="within_14_days">Expiring within 14 days</option>
+            <option value="expired">Already expired</option>
+            <option value="valid">Valid beyond 14 days</option>
+            <option value="not_reported">Expiry not reported</option>
+          </select>
           <input
             aria-label="Device owner filter"
             placeholder="Filter owner…"
@@ -419,7 +447,7 @@ export function Devices({ role = "" }: { role?: string }) {
       </div>
       {showColumns && (
         <div className="filter-panel column-picker" aria-label="Device columns">
-          {["status", "role", "owner", "os", "addresses", "last_seen"].map((column) => (
+          {["status", "role", "owner", "os", "addresses", "key_expiry", "last_seen"].map((column) => (
             <label key={column}>
               <input
                 type="checkbox"
@@ -481,6 +509,7 @@ export function DeviceTable({
               {columns.owner !== false && <th>Owner</th>}
               {columns.os !== false && <th>OS / Version</th>}
               {columns.addresses !== false && <th>Addresses</th>}
+              {columns.key_expiry !== false && <th>Key expiry</th>}
               {columns.last_seen !== false && <th>Last seen</th>}
               <th />
             </tr>
@@ -539,6 +568,7 @@ export function DeviceTable({
                 {columns.addresses !== false && <td>
                   <code>{d.addresses[0] ?? "—"}</code>
                 </td>}
+                {columns.key_expiry !== false && <td><KeyExpiryCell value={d.key_expiry} /></td>}
                 {columns.last_seen !== false && <td>{relativeTime(d.last_seen)}</td>}
                 <td>
                   <button
@@ -560,6 +590,33 @@ export function DeviceTable({
       </div>
     </Card>
   );
+}
+
+export function keyExpiryState(
+  value: string | null,
+  now = Date.now(),
+): "not_reported" | "expired" | "expiring" | "valid" {
+  if (!value) return "not_reported";
+  const expiry = new Date(value).getTime();
+  if (!Number.isFinite(expiry)) return "not_reported";
+  if (expiry < now) return "expired";
+  if (expiry <= now + 14 * 24 * 60 * 60 * 1000) return "expiring";
+  return "valid";
+}
+
+function KeyExpiryCell({ value }: { value: string | null }) {
+  const state = keyExpiryState(value);
+  if (state === "not_reported") return <span className="muted">Not reported</span>;
+  const expiry = new Date(value!);
+  const date = expiry.toLocaleDateString();
+  if (state === "expired") {
+    return <><Badge tone="danger">Expired</Badge><small className="block">{date}</small></>;
+  }
+  if (state === "expiring") {
+    const days = Math.max(0, Math.ceil((expiry.getTime() - Date.now()) / 86_400_000));
+    return <><Badge tone="warning">Expires in {days}d</Badge><small className="block">{date}</small></>;
+  }
+  return <><span>{date}</span><small className="block">Beyond 14 days</small></>;
 }
 
 export function Topology() {

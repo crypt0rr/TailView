@@ -5,6 +5,8 @@ import {
   AddressInventoryView,
   DeviceTable,
   PolicySecurityReview,
+  dashboardMetricCards,
+  keyExpiryState,
   trafficChartData,
   trafficTimeLabel,
   trafficVolumeLabel,
@@ -69,6 +71,24 @@ describe("TailView", () => {
     ]);
     expect(points.map((point) => point.reported)).toEqual([2.5, 0]);
     expect(points.at(0)?.time).toBe("2026-07-21T10:00:00Z");
+  });
+
+  it("links dashboard metrics to their inventory overviews", () => {
+    const cards = dashboardMetricCards({ devices: 47, online: 44, users: 4, expiring_keys: 9 });
+    expect(cards.find((card) => card.label === "Expiring keys")?.href).toBe(
+      "/devices?key_expiry=within_14_days",
+    );
+    expect(cards.find((card) => card.label === "Online")?.href).toBe(
+      "/devices?status=online",
+    );
+  });
+
+  it("distinguishes expiring keys from already expired keys", () => {
+    const now = Date.parse("2026-07-21T12:00:00Z");
+    expect(keyExpiryState("2026-07-20T12:00:00Z", now)).toBe("expired");
+    expect(keyExpiryState("2026-07-28T12:00:00Z", now)).toBe("expiring");
+    expect(keyExpiryState("2026-08-21T12:00:00Z", now)).toBe("valid");
+    expect(keyExpiryState(null, now)).toBe("not_reported");
   });
 
   it("uses compact, bounded traffic-axis labels", () => {

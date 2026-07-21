@@ -252,6 +252,7 @@ async def test_device_keyset_uses_display_name_and_filters(db_session) -> None: 
         role="",
         status_filter="online",
         owner="",
+        key_expiry="",
     )
     second = await devices(
         VIEWER,
@@ -262,8 +263,38 @@ async def test_device_keyset_uses_display_name_and_filters(db_session) -> None: 
         role="",
         status_filter="online",
         owner="",
+        key_expiry="",
     )
     assert [first["items"][0]["name"], second["items"][0]["name"]] == [
         "Aardvark",
         "alpha.example.ts.net",
     ]
+
+
+@pytest.mark.asyncio
+async def test_expiring_key_overview_excludes_expired_and_long_lived_keys(db_session) -> None:  # type: ignore[no-untyped-def]
+    now = datetime.now(UTC)
+    expired = make_device("expired", "expired.example.ts.net")
+    expired.key_expiry = now - timedelta(days=1)
+    expiring = make_device("expiring", "expiring.example.ts.net")
+    expiring.key_expiry = now + timedelta(days=7)
+    valid = make_device("valid", "valid.example.ts.net")
+    valid.key_expiry = now + timedelta(days=30)
+    db_session.add_all([expired, expiring, valid])
+    await db_session.commit()
+
+    overview = await dashboard(VIEWER, db_session, hours=24)
+    page = await devices(
+        VIEWER,
+        db_session,
+        cursor=None,
+        limit=50,
+        search="",
+        role="",
+        status_filter="",
+        owner="",
+        key_expiry="within_14_days",
+    )
+
+    assert overview["expiring_keys"] == 1
+    assert [item["id"] for item in page["items"]] == ["expiring"]

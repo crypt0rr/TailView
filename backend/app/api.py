@@ -221,12 +221,16 @@ async def dashboard(
     ) or 0
     users = (await db.scalar(select(func.count()).select_from(TailnetUser))) or 0
     flows = (await db.scalar(select(func.count()).select_from(Flow))) or 0
-    cutoff = datetime.now(UTC) + timedelta(days=14)
+    cutoff = now + timedelta(days=14)
     expiring = (
         await db.scalar(
             select(func.count())
             .select_from(Device)
-            .where(Device.key_expiry.is_not(None), Device.key_expiry < cutoff)
+            .where(
+                Device.key_expiry.is_not(None),
+                Device.key_expiry >= now,
+                Device.key_expiry <= cutoff,
+            )
         )
     ) or 0
     roles = (
@@ -268,7 +272,13 @@ async def dashboard(
     }
 
 
-def _device_query(search: str, role: str, status_filter: str, owner: str) -> tuple[Any, Any]:
+def _device_query(
+    search: str,
+    role: str,
+    status_filter: str,
+    owner: str,
+    key_expiry: str = "",
+) -> tuple[Any, Any]:
     sort_key = func.lower(func.coalesce(LocalMetadata.display_name, Device.name, Device.id))
     query = (
         select(Device, LocalMetadata, TailnetUser, sort_key.label("sort_key"))
@@ -304,6 +314,27 @@ def _device_query(search: str, role: str, status_filter: str, owner: str) -> tup
                 TailnetUser.login_name.ilike(owner_pattern),
             )
         )
+    if key_expiry:
+        allowed_key_expiry = {"within_14_days", "expired", "valid", "not_reported"}
+        if key_expiry not in allowed_key_expiry:
+            raise HTTPException(
+                422,
+                "key_expiry must be within_14_days, expired, valid, or not_reported",
+            )
+        now = datetime.now(UTC)
+        cutoff = now + timedelta(days=14)
+        if key_expiry == "within_14_days":
+            query = query.where(
+                Device.key_expiry.is_not(None),
+                Device.key_expiry >= now,
+                Device.key_expiry <= cutoff,
+            )
+        elif key_expiry == "expired":
+            query = query.where(Device.key_expiry.is_not(None), Device.key_expiry < now)
+        elif key_expiry == "valid":
+            query = query.where(Device.key_expiry.is_not(None), Device.key_expiry > cutoff)
+        else:
+            query = query.where(Device.key_expiry.is_(None))
     return query, sort_key
 
 
@@ -317,9 +348,10 @@ async def devices(
     role: str = "",
     status_filter: str = Query("", alias="status"),
     owner: str = "",
+    key_expiry: str = "",
 ) -> dict[str, Any]:
     cursor_data = decode_cursor(cursor, "devices")
-    query, sort_key = _device_query(search, role, status_filter, owner)
+    query, sort_key = _device_query(search, role, status_filter, owner, key_expiry)
     if cursor_data:
         try:
             cursor_name = str(cursor_data["name"])
@@ -350,8 +382,9 @@ async def export_devices(
     role: str = "",
     status_filter: str = Query("", alias="status"),
     owner: str = "",
+    key_expiry: str = "",
 ) -> StreamingResponse:
-    query, _ = _device_query(search, role, status_filter, owner)
+    query, _ = _device_query(search, role, status_filter, owner, key_expiry)
     probe_query = query.with_only_columns(Device.id).limit(settings.export_row_limit + 1)
     probe = (await db.execute(probe_query)).all()
     truncated = len(probe) > settings.export_row_limit
@@ -368,6 +401,7 @@ async def export_devices(
             "os",
             "version",
             "addresses",
+            "key_expiry",
             "last_seen",
             "source",
         ]
@@ -388,6 +422,7 @@ async def export_devices(
                 ),
                 "owner": item["owner_display_name"] or item["owner_login_name"] or "",
                 "addresses": ";".join(item["addresses"]),
+                "key_expiry": item["key_expiry"].isoformat() if item["key_expiry"] else "",
                 "last_seen": item["last_seen"].isoformat() if item["last_seen"] else "",
             }
             yield _csv_line([values.get(column, "") for column in columns])
