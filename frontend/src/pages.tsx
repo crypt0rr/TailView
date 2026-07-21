@@ -59,6 +59,7 @@ import type {
   AddressInventory,
   Device,
   FlowRecord,
+  FlowDeviceTraffic,
   FlowSummary,
   ObservedPhysicalEndpoint,
   Page,
@@ -1249,6 +1250,7 @@ export function Flows() {
   const [protocol, setProtocol] = useState(searchParams.get("protocol") ?? "");
   const [port, setPort] = useState(searchParams.get("port") ?? "");
   const [resolution, setResolution] = useState(searchParams.get("resolution") ?? "all");
+  const [rankingLimit, setRankingLimit] = useState(10);
   const [showFilters, setShowFilters] = useState(
     Boolean(source || destination || protocol || port || resolution !== "all"),
   );
@@ -1361,6 +1363,12 @@ export function Flows() {
           </AreaChart>
         </ResponsiveContainer>
       </Card>
+      <DeviceTrafficRanking
+        devices={summary.data?.top_devices ?? []}
+        limit={rankingLimit}
+        setLimit={setRankingLimit}
+        loading={summary.isLoading}
+      />
       <div className="toolbar">
         <div className="filter-chips">
           {["", "virtual", "subnet", "exit", "physical"].map((c) => (
@@ -1532,6 +1540,74 @@ export function Flows() {
         </>
       )}
     </div>
+  );
+}
+
+export function DeviceTrafficRanking({
+  devices,
+  limit,
+  setLimit,
+  loading = false,
+}: {
+  devices: FlowDeviceTraffic[];
+  limit: number;
+  setLimit: (limit: number) => void;
+  loading?: boolean;
+}) {
+  const visible = [...devices]
+    .sort((left, right) => right.reported_bytes - left.reported_bytes)
+    .slice(0, limit);
+  const maximum = visible[0]?.reported_bytes ?? 0;
+  return (
+    <Card className="traffic-ranking-card">
+      <CardHead
+        title="Devices by reported traffic"
+        detail="Resolved endpoint involvement across the selected range and active filters"
+        action={
+          <select
+            aria-label="Number of traffic-ranked devices"
+            value={limit}
+            onChange={(event) => setLimit(Number(event.target.value))}
+          >
+            <option value={10}>Top 10</option>
+            <option value={25}>Top 25</option>
+            <option value={50}>Top 50</option>
+          </select>
+        }
+      />
+      {loading ? (
+        <p className="muted">Loading device ranking…</p>
+      ) : visible.length === 0 ? (
+        <p className="muted">No resolved devices match this range and filter set.</p>
+      ) : (
+        <div className="traffic-ranking" role="list" aria-label="Devices ranked by traffic">
+          {visible.map((device, index) => (
+            <div key={device.device_id} role="listitem" className="traffic-ranking-row">
+              <span className="rank">{String(index + 1).padStart(2, "0")}</span>
+              <div className="traffic-ranking-identity">
+                <EntityLink label={device.name} deviceId={device.device_id} />
+                <small>{device.record_count.toLocaleString()} matching windows</small>
+              </div>
+              <span className="flow-line" aria-hidden="true">
+                <i
+                  style={{
+                    width: `${maximum ? Math.max(3, (device.reported_bytes / maximum) * 100) : 0}%`,
+                  }}
+                />
+              </span>
+              <div className="traffic-ranking-volume">
+                <strong>{formatBytes(device.reported_bytes)}</strong>
+                <small>{device.reported_packets.toLocaleString()} packets</small>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="ranking-notice">
+        Reported volume can overlap when both peers report the same connection. A flow involving
+        two resolved devices contributes to each device’s involvement total.
+      </p>
+    </Card>
   );
 }
 

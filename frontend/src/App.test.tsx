@@ -3,6 +3,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import {
   AddressInventoryView,
+  DeviceTrafficRanking,
   DeviceTable,
   PolicySecurityReview,
   dashboardMetricCards,
@@ -72,6 +73,37 @@ describe("TailView", () => {
     ]);
     expect(points.map((point) => point.reported)).toEqual([2.5, 0]);
     expect(points.at(0)?.time).toBe("2026-07-21T10:00:00Z");
+  });
+
+  it("ranks devices by reported traffic from highest to lowest", () => {
+    render(
+      <MemoryRouter>
+        <DeviceTrafficRanking
+          devices={[
+            {
+              device_id: "low",
+              name: "Low traffic",
+              reported_bytes: 100,
+              reported_packets: 1,
+              record_count: 1,
+            },
+            {
+              device_id: "high",
+              name: "High traffic",
+              reported_bytes: 10_000,
+              reported_packets: 20,
+              record_count: 4,
+            },
+          ]}
+          limit={10}
+          setLimit={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    const ranked = screen.getAllByRole("listitem");
+    expect(ranked[0]?.textContent).toContain("High traffic");
+    expect(ranked[1]?.textContent).toContain("Low traffic");
   });
 
   it("links dashboard metrics to their inventory overviews", () => {

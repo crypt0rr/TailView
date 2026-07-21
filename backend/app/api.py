@@ -28,6 +28,7 @@ from .flow_data import (
     apply_flow_filters,
     decode_cursor,
     encode_cursor,
+    flow_device_ranking,
     flow_keyset_condition,
     flow_summary_series,
     validate_flow_filters,
@@ -1001,12 +1002,19 @@ async def flows_summary(
         port=port,
         resolution=resolution,
     )
-    series = await flow_summary_series(db, filters, now=datetime.now(UTC))
+    now = datetime.now(UTC)
+    series = await flow_summary_series(db, filters, now=now)
+    top_devices = await flow_device_ranking(db, filters, now=now)
+    labels = await device_label_map(db)
     return {
         "series": series,
         "reported_bytes": sum(point["reported_bytes"] for point in series),
         "reported_packets": sum(point["reported_packets"] for point in series),
         "record_count": sum(point["record_count"] for point in series),
+        "top_devices": [
+            {**item, "name": labels.get(item["device_id"], item["device_id"])}
+            for item in top_devices
+        ],
         "range_hours": hours,
         "notice": "Reported volumes can overlap because both peers may report a connection.",
     }

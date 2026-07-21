@@ -157,6 +157,15 @@ export interface FlowSummary {
   reported_bytes: number;
   reported_packets: number;
   record_count: number;
+  top_devices: FlowDeviceTraffic[];
   range_hours: number;
   notice: string;
+}
+
+export interface FlowDeviceTraffic {
+  device_id: string;
+  name: string;
+  reported_bytes: number;
+  reported_packets: number;
+  record_count: number;
 }

@@ -721,6 +721,41 @@ aside nav button.active {
   display: block;
   font-size: 11px;
 }
+.traffic-ranking-card {
+  padding: 18px;
+}
+.traffic-ranking-card .card-head select {
+  min-width: 100px;
+}
+.traffic-ranking-row {
+  display: grid;
+  grid-template-columns: 32px minmax(180px, 1fr) minmax(120px, 2fr) minmax(110px, auto);
+  align-items: center;
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+.traffic-ranking-row:last-child {
+  border-bottom: 0;
+}
+.traffic-ranking-identity small,
+.traffic-ranking-volume small {
+  display: block;
+  color: var(--muted);
+  font-size: 9px;
+  margin-top: 3px;
+}
+.traffic-ranking-volume {
+  text-align: right;
+}
+.traffic-ranking-volume strong {
+  font-size: 11px;
+}
+.ranking-notice {
+  color: var(--muted);
+  font-size: 9px;
+  margin: 12px 0 0;
+}
 .entity-link {
   color: var(--accent-bright);
   text-decoration: none;
@@ -1880,6 +1915,13 @@ td small {
   .toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+  .traffic-ranking-row {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    gap: 9px;
+  }
+  .traffic-ranking-row .flow-line {
+    display: none;
   }
   .search-field {
     min-width: 0;

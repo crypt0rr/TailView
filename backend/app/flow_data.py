@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import HTTPException
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Device, Flow, LocalMetadata
@@ -74,12 +74,16 @@ def apply_flow_filters(statement: Any, filters: FlowFilters, now: datetime) -> A
     statement = statement.where(Flow.start >= flow_cutoff(now, filters.hours))
     if filters.source:
         pattern = f"%{filters.source}%"
-        matching_devices = select(Device.id).outerjoin(LocalMetadata).where(
-            or_(
-                Device.id == filters.source,
-                Device.name.ilike(pattern),
-                Device.hostname.ilike(pattern),
-                LocalMetadata.display_name.ilike(pattern),
+        matching_devices = (
+            select(Device.id)
+            .outerjoin(LocalMetadata)
+            .where(
+                or_(
+                    Device.id == filters.source,
+                    Device.name.ilike(pattern),
+                    Device.hostname.ilike(pattern),
+                    LocalMetadata.display_name.ilike(pattern),
+                )
             )
         )
         statement = statement.where(
@@ -91,12 +95,16 @@ def apply_flow_filters(statement: Any, filters: FlowFilters, now: datetime) -> A
         )
     if filters.destination:
         pattern = f"%{filters.destination}%"
-        matching_devices = select(Device.id).outerjoin(LocalMetadata).where(
-            or_(
-                Device.id == filters.destination,
-                Device.name.ilike(pattern),
-                Device.hostname.ilike(pattern),
-                LocalMetadata.display_name.ilike(pattern),
+        matching_devices = (
+            select(Device.id)
+            .outerjoin(LocalMetadata)
+            .where(
+                or_(
+                    Device.id == filters.destination,
+                    Device.name.ilike(pattern),
+                    Device.hostname.ilike(pattern),
+                    LocalMetadata.display_name.ilike(pattern),
+                )
             )
         )
         statement = statement.where(
@@ -176,12 +184,16 @@ async def flow_summary_series(
             Flow.start,
             datetime(1970, 1, 1, tzinfo=UTC),
         ).label("bucket_start")
-        statement = select(
-            bucket,
-            func.sum(Flow.tx_bytes + Flow.rx_bytes),
-            func.sum(Flow.tx_packets + Flow.rx_packets),
-            func.count(Flow.id),
-        ).group_by(bucket).order_by(bucket)
+        statement = (
+            select(
+                bucket,
+                func.sum(Flow.tx_bytes + Flow.rx_bytes),
+                func.sum(Flow.tx_packets + Flow.rx_packets),
+                func.count(Flow.id),
+            )
+            .group_by(bucket)
+            .order_by(bucket)
+        )
         statement = apply_flow_filters(statement, filters, now)
         raw_rows = (await db.execute(statement)).all()
         rows = [
@@ -210,6 +222,64 @@ async def flow_summary_series(
             )
         rows = [(key, *value) for key, value in sorted(aggregated.items())]
     return fill_series(rows, now=now, hours=filters.hours)
+
+
+async def flow_device_ranking(
+    db: AsyncSession,
+    filters: FlowFilters,
+    *,
+    now: datetime,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Rank resolved endpoint devices by reported volume across matching flow windows."""
+    volume = (Flow.tx_bytes + Flow.rx_bytes).label("reported_bytes")
+    packets = (Flow.tx_packets + Flow.rx_packets).label("reported_packets")
+    source = apply_flow_filters(
+        select(
+            Flow.source_device_id.label("device_id"),
+            volume,
+            packets,
+        ).where(Flow.source_device_id.is_not(None)),
+        filters,
+        now,
+    )
+    destination = apply_flow_filters(
+        select(
+            Flow.destination_device_id.label("device_id"),
+            volume,
+            packets,
+        ).where(
+            Flow.destination_device_id.is_not(None),
+            or_(
+                Flow.source_device_id.is_(None),
+                Flow.destination_device_id != Flow.source_device_id,
+            ),
+        ),
+        filters,
+        now,
+    )
+    endpoints = union_all(source, destination).subquery()
+    statement = (
+        select(
+            endpoints.c.device_id,
+            func.sum(endpoints.c.reported_bytes).label("reported_bytes"),
+            func.sum(endpoints.c.reported_packets).label("reported_packets"),
+            func.count().label("record_count"),
+        )
+        .group_by(endpoints.c.device_id)
+        .order_by(func.sum(endpoints.c.reported_bytes).desc(), endpoints.c.device_id)
+        .limit(limit)
+    )
+    rows = (await db.execute(statement)).all()
+    return [
+        {
+            "device_id": device_id,
+            "reported_bytes": int(reported_bytes or 0),
+            "reported_packets": int(reported_packets or 0),
+            "record_count": int(record_count or 0),
+        }
+        for device_id, reported_bytes, reported_packets, record_count in rows
+    ]
 
 
 def flow_keyset_condition(cursor: dict[str, Any]) -> Any:

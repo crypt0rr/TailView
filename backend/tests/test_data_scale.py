@@ -209,6 +209,28 @@ async def test_flow_filters_summary_dashboard_and_export_agree(db_session) -> No
     assert summary["reported_bytes"] == 500
     assert summary["reported_packets"] == 3
     assert summary["record_count"] == 1
+    assert [item["device_id"] for item in summary["top_devices"]] == ["node-a", "node-b"]
+    assert all(item["reported_bytes"] == 500 for item in summary["top_devices"])
+
+    unfiltered_summary = await flows_summary(
+        VIEWER,
+        db_session,
+        source="",
+        destination="",
+        category="",
+        protocol=None,
+        port=None,
+        resolution="all",
+        hours=24,
+    )
+    assert [item["device_id"] for item in unfiltered_summary["top_devices"]] == [
+        "node-a",
+        "node-b",
+    ]
+    assert [item["reported_bytes"] for item in unfiltered_summary["top_devices"]] == [
+        1400,
+        500,
+    ]
 
     overview = await dashboard(VIEWER, db_session, hours=24)
     assert sum(point["reported_bytes"] for point in overview["traffic_series"]) == 1400
