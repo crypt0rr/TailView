@@ -219,12 +219,14 @@ export function dashboardMetricCards(d: Record<string, any>) {
 
 export function TrafficChart({
   data,
+  height = 260,
 }: {
   data: Array<{ bucket_start: string; reported_bytes: number }>;
+  height?: number;
 }) {
   const chartData = trafficChartData(data);
   return (
-    <ResponsiveContainer width="100%" height={260}>
+    <ResponsiveContainer width="100%" height={height}>
       <AreaChart
         data={chartData}
         margin={{ top: 12, right: 18, bottom: 8, left: 8 }}
@@ -1290,19 +1292,6 @@ export function Flows() {
     () => query.data?.pages.flatMap((page) => page.items) ?? [],
     [query.data?.pages],
   );
-  const chart = useMemo(
-    () =>
-      (summary.data?.series ?? []).map((point) => ({
-        time: new Date(point.bucket_start).toLocaleString([], {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
-        mb: point.reported_bytes / 1e6,
-      })),
-    [summary.data?.series],
-  );
   const setCategoryFilter = (value: string) => {
     setCategory(value);
     updateFilter("category", value);
@@ -1350,18 +1339,7 @@ export function Flows() {
               : "TX + RX bytes from matching retrieved flow windows"
           }
         />
-        <ResponsiveContainer width="100%" height={220}>
-          <AreaChart data={chart}>
-            <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-            <XAxis
-              dataKey="time"
-              tick={{ fill: "var(--muted)", fontSize: 11 }}
-            />
-            <YAxis tick={{ fill: "var(--muted)", fontSize: 11 }} unit=" MB" />
-            <Tooltip contentStyle={tooltipStyle} />
-            <Area dataKey="mb" stroke="#5be7c4" fill="#5be7c433" />
-          </AreaChart>
-        </ResponsiveContainer>
+        <TrafficChart data={summary.data?.series ?? []} height={220} />
       </Card>
       <DeviceTrafficRanking
         devices={summary.data?.top_devices ?? []}

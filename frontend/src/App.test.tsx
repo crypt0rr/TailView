@@ -130,6 +130,7 @@ describe("TailView", () => {
     expect(trafficVolumeLabel(0)).toBe("0 MB");
     expect(trafficVolumeLabel(400)).toBe("400 MB");
     expect(trafficVolumeLabel(1600)).toBe("1.6 GB");
+    expect(trafficVolumeLabel(8438.261424)).toBe("8.4 GB");
     expect(trafficTimeLabel("not-a-date")).toBe("not-a-date");
   });
 
