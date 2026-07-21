@@ -20,3 +20,9 @@ Historical observations without a current allow are labelled: “Observed histor
 The Policy Explorer can produce a conservative duplicate review. It recursively removes only canonically identical array entries inside documented policy sections. Unsupported top-level sections are copied without interpretation, and TailView never submits or applies the generated candidate.
 
 The candidate is regenerated as strict JSON, which is valid HuJSON, but original comments and formatting are not retained. It must therefore be treated as a review artifact and validated with Tailscale before any manual replacement. TailView does not combine overlapping selectors, reorder rules, infer semantic equivalence, or perform other speculative optimizations.
+
+## Security review
+
+The Policy Explorer also provides a read-only heuristic security review. It highlights unrestricted all-to-all rules, broad identity or destination selectors, large current-inventory host-to-host expansions, broad access to infrastructure-like destinations without source posture, permissive Tailscale SSH `accept` rules, broad tag ownership, and broad route auto-approval authority.
+
+Each finding includes its policy path, evidence, confidence, affected-pair summary where resolvable, and conservative remediation guidance. Findings are review prompts—not proof of exploitation, policy invalidity, or unnecessary access. TailView cannot infer business intent, and it deliberately does not evaluate application-specific capabilities as ordinary network access. No proposed security change is generated or applied automatically.

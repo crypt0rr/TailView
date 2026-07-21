@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link, useSearchParams } from "react-router-dom";
 import cytoscape from "cytoscape";
 import {
   Activity,
@@ -168,8 +169,17 @@ export function Dashboard() {
               <div key={`${p.source}-${p.destination}`}>
                 <span className="rank">0{i + 1}</span>
                 <div>
-                  <strong>{p.source}</strong>
-                  <small>to {p.destination}</small>
+                  <EntityLink
+                    label={p.source}
+                    deviceId={p.source_device_id}
+                  />
+                  <small>
+                    to{" "}
+                    <EntityLink
+                      label={p.destination}
+                      deviceId={p.destination_device_id}
+                    />
+                  </small>
                 </div>
                 <span className="flow-line">
                   <i style={{ width: `${Math.max(12, 100 - i * 18)}%` }} />
@@ -219,6 +229,8 @@ function TrafficChart() {
 }
 
 export function Devices({ role = "" }: { role?: string }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedDevice = searchParams.get("device");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Device | null>(null);
   const query = useQuery({
@@ -228,6 +240,28 @@ export function Devices({ role = "" }: { role?: string }) {
         `/devices?search=${encodeURIComponent(search)}&role=${encodeURIComponent(role)}`,
       ),
   });
+  const requestedDeviceQuery = useQuery({
+    queryKey: ["device", requestedDevice],
+    queryFn: () => request<Device & { flows: any[] }>(`/devices/${requestedDevice}`),
+    enabled: Boolean(requestedDevice),
+  });
+  useEffect(() => {
+    if (!requestedDevice) return;
+    const device = query.data?.items.find((item) => item.id === requestedDevice);
+    if (device) {
+      setSelected(device);
+    } else if (requestedDeviceQuery.data) {
+      setSelected(requestedDeviceQuery.data);
+    }
+  }, [query.data, requestedDevice, requestedDeviceQuery.data]);
+  const selectDevice = (device: Device) => {
+    setSelected(device);
+    setSearchParams({ device: device.id });
+  };
+  const closeDevice = () => {
+    setSelected(null);
+    setSearchParams({});
+  };
   return (
     <div className="page">
       <PageHead
@@ -251,10 +285,10 @@ export function Devices({ role = "" }: { role?: string }) {
           detail="Adjust filters or check device synchronization."
         />
       ) : (
-        <DeviceTable devices={query.data.items} onSelect={setSelected} />
+        <DeviceTable devices={query.data.items} onSelect={selectDevice} />
       )}
       {selected && (
-        <NodeDrawer device={selected} close={() => setSelected(null)} />
+        <NodeDrawer device={selected} close={closeDevice} />
       )}
     </div>
   );
@@ -327,7 +361,7 @@ export function DeviceTable({
                   )}
                 </td>
                 <td>
-                  {d.owner_id ?? <span className="muted">Tagged identity</span>}
+                  <OwnerLink device={d} />
                 </td>
                 <td>
                   <strong>{d.os}</strong>
@@ -616,7 +650,7 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
           <>
             <DetailGroup title="Identity">
               <Detail label="Full name" value={d.source_name} />
-              <Detail label="Owner" value={d.owner_id ?? "Tagged identity"} />
+              <Detail label="Owner" value={<OwnerLink device={d} />} />
               <Detail label="Operating system" value={`${d.os} ${d.version}`} />
               <Detail
                 label="Last seen"
@@ -749,7 +783,11 @@ function FlowSummary({ flows }: { flows: any[] }) {
             <Activity />
             <div>
               <strong>
-                {f.source} → {f.destination}
+                <EntityLink label={f.source} deviceId={f.source_device_id} /> →{" "}
+                <EntityLink
+                  label={f.destination}
+                  deviceId={f.destination_device_id}
+                />
               </strong>
               <small>
                 {f.category} · port {f.destination_port ?? "not logged"}
@@ -869,10 +907,18 @@ export function Flows() {
                       </small>
                     </td>
                     <td>
-                      <code>{f.source}</code>
+                      <FlowEndpoint
+                        label={f.source}
+                        deviceId={f.source_device_id}
+                        raw={f.source_raw}
+                      />
                     </td>
                     <td>
-                      <code>{f.destination}</code>
+                      <FlowEndpoint
+                        label={f.destination}
+                        deviceId={f.destination_device_id}
+                        raw={f.destination_raw}
+                      />
                     </td>
                     <td>
                       <Badge tone={f.category}>{f.category}</Badge>
@@ -891,7 +937,12 @@ export function Flows() {
                         {f.reported_packets.toLocaleString()} packets
                       </small>
                     </td>
-                    <td>{f.reporting_node}</td>
+                    <td>
+                      <FlowEndpoint
+                        label={f.reporting_node}
+                        deviceId={f.reporting_node_id}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -913,6 +964,11 @@ export function Policy() {
     queryKey: ["policy-review", query.data?.id],
     queryFn: () => request<any>("/policy/review"),
     enabled: tab === "review" && Boolean(query.data?.available),
+  });
+  const securityReview = useQuery({
+    queryKey: ["policy-security-review", query.data?.id],
+    queryFn: () => request<any>("/policy/security-review"),
+    enabled: tab === "security" && Boolean(query.data?.available),
   });
   if (query.isLoading) return <Loading />;
   if (query.error) return <ErrorState error={query.error} />;
@@ -988,6 +1044,12 @@ export function Policy() {
             >
               Duplicate review
             </button>
+            <button
+              className={tab === "security" ? "active" : ""}
+              onClick={() => setTab("security")}
+            >
+              Security review
+            </button>
           </div>
           {tab === "raw" ? (
             <Card className="code-card">
@@ -1004,6 +1066,8 @@ export function Policy() {
             </Card>
           ) : tab === "review" ? (
             <PolicyDuplicateReview query={review} />
+          ) : tab === "security" ? (
+            <PolicySecurityReview query={securityReview} />
           ) : (
             sections.map(([name, value]) => (
               <Card className="policy-section" key={name}>
@@ -1017,6 +1081,109 @@ export function Policy() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+export function PolicySecurityReview({ query }: { query: any }) {
+  if (query.isLoading) return <Loading />;
+  if (query.error) return <ErrorState error={query.error} />;
+  if (!query.data?.available) {
+    return (
+      <Empty
+        title="Security review unavailable"
+        detail={query.data?.status ?? "No valid policy snapshot is available."}
+      />
+    );
+  }
+  const review = query.data;
+  const severities = ["critical", "high", "medium", "low", "info"];
+  return (
+    <div className="review-stack">
+      <Card className="review-summary">
+        <div>
+          <span className="eyebrow">POLICY EXPOSURE REVIEW</span>
+          <h3>
+            {review.finding_count
+              ? `${review.finding_count} potential review ${review.finding_count === 1 ? "item" : "items"}`
+              : "No review items found"}
+          </h3>
+          <p>
+            {review.reviewed_rule_count} rules reviewed against the current inventory
+            {review.incomplete_rule_count
+              ? ` · ${review.incomplete_rule_count} incomplete expansions`
+              : ""}
+          </p>
+        </div>
+        <Badge tone={review.counts.critical || review.counts.high ? "danger" : "success"}>
+          {review.review_status}
+        </Badge>
+      </Card>
+      <div className="security-summary-grid">
+        {severities.map((severity) => (
+          <Card className={`security-count ${severity}`} key={severity}>
+            <strong>{review.counts[severity] ?? 0}</strong>
+            <span>{severity}</span>
+          </Card>
+        ))}
+      </div>
+      <div className="notice-bar warning">
+        <AlertTriangle />
+        <span>
+          <strong>Human review required.</strong> {review.notice}
+        </span>
+      </div>
+      {review.findings.length ? (
+        <div className="security-findings">
+          {review.findings.map((finding: any) => (
+            <Card className={`security-finding ${finding.severity}`} key={finding.id}>
+              <div className="security-finding-head">
+                <div>
+                  <Badge tone={finding.severity === "critical" || finding.severity === "high" ? "danger" : "warning"}>
+                    {finding.severity}
+                  </Badge>
+                  <span>{finding.category.replaceAll("_", " ")}</span>
+                </div>
+                <code>{finding.path}</code>
+              </div>
+              <h3>{finding.title}</h3>
+              <p>{finding.evidence}</p>
+              {finding.affected_pair_count != null && (
+                <div className="security-impact">
+                  <strong>{finding.affected_pair_count.toLocaleString()} device pairs</strong>
+                  {finding.sample_sources.length > 0 && (
+                    <small>Sources: {finding.sample_sources.join(", ")}</small>
+                  )}
+                  {finding.sample_destinations.length > 0 && (
+                    <small>Destinations: {finding.sample_destinations.join(", ")}</small>
+                  )}
+                </div>
+              )}
+              <div className="security-recommendation">
+                <ShieldCheck />
+                <div>
+                  <strong>Suggested review</strong>
+                  <span>{finding.recommendation}</span>
+                </div>
+              </div>
+              <small className="security-confidence">Confidence: {finding.confidence}</small>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <Empty
+          title="No heuristic findings"
+          detail="No patterns covered by the current conservative review were detected. This is not a security guarantee."
+        />
+      )}
+      <Card className="security-limitations">
+        <CardHead title="Review limitations" detail="What this result cannot establish" />
+        <ul>
+          {review.limitations.map((limitation: string) => (
+            <li key={limitation}>{limitation}</li>
+          ))}
+        </ul>
+      </Card>
     </div>
   );
 }
@@ -1127,6 +1294,7 @@ function PolicyDuplicateReview({ query }: { query: any }) {
 }
 
 export function InventoryPage({ kind }: { kind: string }) {
+  const [searchParams] = useSearchParams();
   const endpoint =
     kind === "audit" ? "/audit" : kind === "sync" ? "/sync" : `/${kind}`;
   const query = useQuery({
@@ -1163,14 +1331,34 @@ export function InventoryPage({ kind }: { kind: string }) {
           detail="The capability may be unavailable, unsynchronized, or absent from this tailnet."
         />
       ) : (
-        <GenericTable rows={query.data.items} />
+        <GenericTable
+          rows={query.data.items}
+          kind={kind}
+          focusId={kind === "users" ? searchParams.get("user") : null}
+        />
       )}
     </div>
   );
 }
-function GenericTable({ rows }: { rows: Record<string, any>[] }) {
+function GenericTable({
+  rows,
+  kind,
+  focusId,
+}: {
+  rows: Record<string, any>[];
+  kind: string;
+  focusId: string | null;
+}) {
+  const hasHumanIdentity = Boolean(rows[0]?.display_name || rows[0]?.name || rows[0]?.device);
   const columns = Object.keys(rows[0] ?? {})
     .filter((k) => !["old", "new", "raw"].includes(k))
+    .filter((k) => !(hasHumanIdentity && ["id", "device_id"].includes(k)))
+    .sort((left, right) => {
+      const priority = ["display_name", "name", "device"];
+      const leftRank = priority.includes(left) ? priority.indexOf(left) : priority.length;
+      const rightRank = priority.includes(right) ? priority.indexOf(right) : priority.length;
+      return leftRank - rightRank;
+    })
     .slice(0, 8);
   return (
     <Card className="table-card">
@@ -1185,10 +1373,15 @@ function GenericTable({ rows }: { rows: Record<string, any>[] }) {
           </thead>
           <tbody>
             {rows.map((row, i) => (
-              <tr key={String(row.id ?? row.name ?? i)}>
+              <tr
+                key={String(row.id ?? row.name ?? i)}
+                className={focusId === String(row.id) ? "focused-row" : undefined}
+              >
                 {columns.map((c) => (
                   <td key={c}>
-                    {typeof row[c] === "object" && row[c] !== null ? (
+                    {kind === "routes" && c === "device" && row.device_id ? (
+                      <EntityLink label={String(row[c])} deviceId={row.device_id} />
+                    ) : typeof row[c] === "object" && row[c] !== null ? (
                       <code>{JSON.stringify(row[c]).slice(0, 100)}</code>
                     ) : typeof row[c] === "boolean" ? (
                       String(row[c])
@@ -1394,12 +1587,65 @@ function DetailGroup({
     </section>
   );
 }
-function Detail({ label, value }: { label: string; value: string }) {
+function Detail({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="detail-row">
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
+  );
+}
+
+function OwnerLink({ device }: { device: Device }) {
+  if (!device.owner_id) return <span className="muted">Tagged identity</span>;
+  const label =
+    device.owner_display_name || device.owner_login_name || device.owner_id;
+  return (
+    <Link
+      className="entity-link"
+      to={`/users?user=${encodeURIComponent(device.owner_id)}`}
+      onClick={(event) => event.stopPropagation()}
+      title={device.owner_login_name || device.owner_id}
+    >
+      {label}
+    </Link>
+  );
+}
+
+function EntityLink({
+  label,
+  deviceId,
+}: {
+  label: string;
+  deviceId?: string | null;
+}) {
+  if (!deviceId) return <span>{label}</span>;
+  return (
+    <Link
+      className="entity-link"
+      to={`/devices?device=${encodeURIComponent(deviceId)}`}
+    >
+      {label}
+    </Link>
+  );
+}
+
+function FlowEndpoint({
+  label,
+  deviceId,
+  raw,
+}: {
+  label: string;
+  deviceId?: string | null;
+  raw?: string | null;
+}) {
+  return (
+    <span className="flow-entity">
+      <strong>
+        <EntityLink label={label} deviceId={deviceId} />
+      </strong>
+      {raw && raw !== label && <code>{raw}</code>}
+    </span>
   );
 }
 const tooltipStyle = {

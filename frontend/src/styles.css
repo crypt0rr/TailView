@@ -703,6 +703,27 @@ aside nav button.active {
   display: block;
   font-size: 11px;
 }
+.entity-link {
+  color: var(--accent-bright);
+  text-decoration: none;
+}
+.entity-link:hover,
+.entity-link:focus-visible {
+  text-decoration: underline;
+}
+.flow-entity strong,
+.flow-entity code {
+  display: block;
+}
+.flow-entity code {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
+.focused-row {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: inset 3px 0 var(--accent);
+}
 .pair-list small {
   color: var(--muted);
   margin-top: 3px;
@@ -1337,6 +1358,143 @@ td small {
 .candidate-card .code-head > div {
   display: flex;
   gap: 5px;
+}
+.security-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+.security-count {
+  padding: 14px;
+  border-top: 3px solid var(--border);
+}
+.security-count.critical,
+.security-count.high {
+  border-top-color: var(--danger);
+}
+.security-count.medium {
+  border-top-color: var(--warning);
+}
+.security-count strong,
+.security-count span {
+  display: block;
+}
+.security-count strong {
+  font-size: 21px;
+}
+.security-count span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+.security-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.security-finding {
+  padding: 17px;
+  border-left: 3px solid var(--border);
+}
+.security-finding.critical,
+.security-finding.high {
+  border-left-color: var(--danger);
+}
+.security-finding.medium {
+  border-left-color: var(--warning);
+}
+.security-finding-head,
+.security-finding-head > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.security-finding-head {
+  justify-content: space-between;
+}
+.security-finding-head > div > span,
+.security-confidence {
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+.security-finding-head code {
+  color: var(--accent-bright);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+.security-finding h3 {
+  margin: 11px 0 5px;
+  font-size: 14px;
+}
+.security-finding > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+.security-impact {
+  margin-top: 11px;
+  padding: 10px;
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+.security-impact strong,
+.security-impact small {
+  display: block;
+}
+.security-impact small {
+  margin-top: 3px;
+  color: var(--muted);
+}
+.security-recommendation {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 12px 0 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.security-recommendation svg {
+  width: 16px;
+  color: var(--accent);
+  flex: none;
+}
+.security-recommendation strong,
+.security-recommendation span {
+  display: block;
+}
+.security-recommendation strong {
+  font-size: 10px;
+}
+.security-recommendation span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.security-limitations {
+  overflow: hidden;
+}
+.security-limitations > .card-head {
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.security-limitations ul {
+  margin: 0;
+  padding: 14px 34px 17px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.7;
+}
+@media (max-width: 760px) {
+  .security-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .security-finding-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 .settings-grid {
   display: grid;

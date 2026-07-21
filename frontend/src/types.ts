@@ -6,6 +6,8 @@ export interface Device {
   os: string;
   version: string;
   owner_id: string | null;
+  owner_display_name: string | null;
+  owner_login_name: string | null;
   online: boolean | null;
   authorized: boolean | null;
   last_seen: string | null;

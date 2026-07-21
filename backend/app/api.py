@@ -31,7 +31,7 @@ from .models import (
     TailnetUser,
     TelemetryObservation,
 )
-from .policy import evaluate_policy, review_policy
+from .policy import evaluate_policy, review_policy, security_review_policy
 from .schemas import CredentialRequest, LoginRequest, MetadataUpdate, SetupRequest, UserResponse
 from .security import SecretBox
 from .sync import sync_inventory, sync_logs, sync_policy
@@ -56,7 +56,11 @@ def decode_cursor(value: str | None) -> int:
         raise HTTPException(400, "Invalid cursor") from exc
 
 
-def device_dict(device: Device, metadata: LocalMetadata | None = None) -> dict[str, Any]:
+def device_dict(
+    device: Device,
+    metadata: LocalMetadata | None = None,
+    owner: TailnetUser | None = None,
+) -> dict[str, Any]:
     return {
         "id": device.id,
         "name": metadata.display_name if metadata and metadata.display_name else device.name,
@@ -65,6 +69,8 @@ def device_dict(device: Device, metadata: LocalMetadata | None = None) -> dict[s
         "os": device.os,
         "version": device.version,
         "owner_id": device.owner_id,
+        "owner_display_name": owner.display_name if owner and owner.display_name else None,
+        "owner_login_name": owner.login_name if owner and owner.login_name else None,
         "online": device.online,
         "authorized": device.authorized,
         "last_seen": device.last_seen,
@@ -89,6 +95,34 @@ def device_dict(device: Device, metadata: LocalMetadata | None = None) -> dict[s
         if metadata
         else None,
     }
+
+
+async def device_label_map(db: AsyncSession) -> dict[str, str]:
+    rows = (
+        await db.execute(
+            select(Device.id, Device.name, LocalMetadata.display_name).outerjoin(LocalMetadata)
+        )
+    ).all()
+    return {device_id: display_name or name or device_id for device_id, name, display_name in rows}
+
+
+def flow_identity(
+    device_id: str | None,
+    raw_value: str | None,
+    labels: dict[str, str],
+    unavailable: str,
+) -> dict[str, str | None]:
+    return {
+        "id": device_id,
+        "label": labels.get(device_id, device_id) if device_id else (raw_value or unavailable),
+        "raw": raw_value,
+    }
+
+
+def preferred_device_label(
+    device_id: str | None, raw_value: str | None, labels: dict[str, str]
+) -> str:
+    return (labels.get(device_id) if device_id else None) or device_id or raw_value or "Unavailable"
 
 
 @router.get("/setup/status")
@@ -165,6 +199,7 @@ async def dashboard(_: Authed, db: Db) -> dict[str, Any]:
             .limit(5)
         )
     ).all()
+    labels = await device_label_map(db)
     return {
         "devices": device_count,
         "online": online,
@@ -175,7 +210,14 @@ async def dashboard(_: Authed, db: Db) -> dict[str, Any]:
         "roles": [{"name": n, "value": c} for n, c in roles],
         "operating_systems": [{"name": n, "value": c} for n, c in os_rows],
         "top_pairs": [
-            {"source": s, "destination": d, "reported_bytes": b or 0} for s, d, b in top_pairs
+            {
+                "source": labels.get(s, s or "Unresolved source"),
+                "source_device_id": s,
+                "destination": labels.get(d, d or "Unresolved destination"),
+                "destination_device_id": d,
+                "reported_bytes": b or 0,
+            }
+            for s, d, b in top_pairs
         ],
         "generated_at": datetime.now(UTC),
         "traffic_label": "Reported bytes; peer reports may overlap",
@@ -192,20 +234,27 @@ async def devices(
     role: str = "",
 ) -> dict[str, Any]:
     offset = decode_cursor(cursor)
-    query = select(Device, LocalMetadata).outerjoin(LocalMetadata).order_by(Device.name)
+    query = (
+        select(Device, LocalMetadata, TailnetUser)
+        .outerjoin(LocalMetadata)
+        .outerjoin(TailnetUser, Device.owner_id == TailnetUser.id)
+        .order_by(Device.name)
+    )
     if search:
         query = query.where(
             or_(
                 Device.name.ilike(f"%{search}%"),
                 Device.hostname.ilike(f"%{search}%"),
                 Device.os.ilike(f"%{search}%"),
+                TailnetUser.display_name.ilike(f"%{search}%"),
+                TailnetUser.login_name.ilike(f"%{search}%"),
             )
         )
     if role:
         query = query.where(Device.primary_role == role)
     rows = (await db.execute(query.offset(offset).limit(limit + 1))).all()
     return {
-        "items": [device_dict(d, m) for d, m in rows[:limit]],
+        "items": [device_dict(d, m, owner) for d, m, owner in rows[:limit]],
         "next_cursor": encode_cursor(offset + limit) if len(rows) > limit else None,
     }
 
@@ -214,12 +263,15 @@ async def devices(
 async def device(device_id: str, _: Authed, db: Db) -> dict[str, Any]:
     row = (
         await db.execute(
-            select(Device, LocalMetadata).outerjoin(LocalMetadata).where(Device.id == device_id)
+            select(Device, LocalMetadata, TailnetUser)
+            .outerjoin(LocalMetadata)
+            .outerjoin(TailnetUser, Device.owner_id == TailnetUser.id)
+            .where(Device.id == device_id)
         )
     ).first()
     if not row:
         raise HTTPException(404, "Device not found")
-    item = device_dict(row[0], row[1])
+    item = device_dict(row[0], row[1], row[2])
     flows = (
         (
             await db.execute(
@@ -234,21 +286,31 @@ async def device(device_id: str, _: Authed, db: Db) -> dict[str, Any]:
         .scalars()
         .all()
     )
-    item["flows"] = [
-        {
-            "id": f.id,
-            "source": f.source_device_id,
-            "destination": f.destination_device_id,
-            "category": f.category,
-            "protocol": f.protocol,
-            "destination_port": f.destination_port,
-            "reported_bytes": f.tx_bytes + f.rx_bytes,
-            "start": f.start,
-            "end": f.end,
-            "provenance": "demo" if f.raw.get("demo") else "network_flow_logs",
-        }
-        for f in flows
-    ]
+    labels = await device_label_map(db)
+    item["flows"] = []
+    for f in flows:
+        source = flow_identity(f.source_device_id, f.source, labels, "Unresolved source")
+        destination = flow_identity(
+            f.destination_device_id, f.destination, labels, "Destination not logged"
+        )
+        item["flows"].append(
+            {
+                "id": f.id,
+                "source": source["label"],
+                "source_device_id": source["id"],
+                "source_raw": source["raw"],
+                "destination": destination["label"],
+                "destination_device_id": destination["id"],
+                "destination_raw": destination["raw"],
+                "category": f.category,
+                "protocol": f.protocol,
+                "destination_port": f.destination_port,
+                "reported_bytes": f.tx_bytes + f.rx_bytes,
+                "start": f.start,
+                "end": f.end,
+                "provenance": "demo" if f.raw.get("demo") else "network_flow_logs",
+            }
+        )
     return item
 
 
@@ -410,24 +472,38 @@ async def flows(
     if category:
         query = query.where(Flow.category == category)
     rows = (await db.execute(query.offset(offset).limit(limit + 1))).scalars().all()
-    items = [
-        {
-            "id": f.id,
-            "source": f.source_device_id or f.source,
-            "destination": f.destination_device_id or f.destination or "Destination not logged",
-            "protocol": f.protocol,
-            "source_port": f.source_port,
-            "destination_port": f.destination_port,
-            "category": f.category,
-            "reported_bytes": f.tx_bytes + f.rx_bytes,
-            "reported_packets": f.tx_packets + f.rx_packets,
-            "start": f.start,
-            "end": f.end,
-            "reporting_node": f.reporting_node_id,
-            "provenance": "demo" if f.raw.get("demo") else "network_flow_logs",
-        }
-        for f in rows[:limit]
-    ]
+    labels = await device_label_map(db)
+    items = []
+    for f in rows[:limit]:
+        source_identity = flow_identity(f.source_device_id, f.source, labels, "Unresolved source")
+        destination_identity = flow_identity(
+            f.destination_device_id, f.destination, labels, "Destination not logged"
+        )
+        reporter_identity = flow_identity(
+            f.reporting_node_id, f.reporting_node_id, labels, "Reporter not reported"
+        )
+        items.append(
+            {
+                "id": f.id,
+                "source": source_identity["label"],
+                "source_device_id": source_identity["id"],
+                "source_raw": source_identity["raw"],
+                "destination": destination_identity["label"],
+                "destination_device_id": destination_identity["id"],
+                "destination_raw": destination_identity["raw"],
+                "protocol": f.protocol,
+                "source_port": f.source_port,
+                "destination_port": f.destination_port,
+                "category": f.category,
+                "reported_bytes": f.tx_bytes + f.rx_bytes,
+                "reported_packets": f.tx_packets + f.rx_packets,
+                "start": f.start,
+                "end": f.end,
+                "reporting_node": reporter_identity["label"],
+                "reporting_node_id": reporter_identity["id"],
+                "provenance": "demo" if f.raw.get("demo") else "network_flow_logs",
+            }
+        )
     return {
         "items": items,
         "next_cursor": encode_cursor(offset + limit) if len(rows) > limit else None,
@@ -442,12 +518,19 @@ async def export_flows(format: str, _: Authed, db: Db) -> StreamingResponse:
     if format not in {"csv", "json"}:
         raise HTTPException(404, "Unsupported export format")
     rows = (await db.execute(select(Flow).order_by(Flow.start.desc()).limit(10000))).scalars().all()
+    labels = await device_label_map(db)
     if format == "json":
         body = json.dumps(
             [
                 {
-                    "source": f.source_device_id or f.source,
-                    "destination": f.destination_device_id or f.destination,
+                    "source": preferred_device_label(f.source_device_id, f.source, labels),
+                    "source_device_id": f.source_device_id,
+                    "source_raw": f.source,
+                    "destination": preferred_device_label(
+                        f.destination_device_id, f.destination, labels
+                    ),
+                    "destination_device_id": f.destination_device_id,
+                    "destination_raw": f.destination,
                     "category": f.category,
                     "protocol": f.protocol,
                     "reported_bytes": f.tx_bytes + f.rx_bytes,
@@ -463,12 +546,29 @@ async def export_flows(format: str, _: Authed, db: Db) -> StreamingResponse:
         )
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["source", "destination", "category", "protocol", "reported_bytes", "start"])
+    writer.writerow(
+        [
+            "source",
+            "source_device_id",
+            "source_raw",
+            "destination",
+            "destination_device_id",
+            "destination_raw",
+            "category",
+            "protocol",
+            "reported_bytes",
+            "start",
+        ]
+    )
     for flow in rows:
         writer.writerow(
             [
-                flow.source_device_id or flow.source,
-                flow.destination_device_id or flow.destination,
+                preferred_device_label(flow.source_device_id, flow.source, labels),
+                flow.source_device_id or "",
+                flow.source,
+                preferred_device_label(flow.destination_device_id, flow.destination, labels),
+                flow.destination_device_id or "",
+                flow.destination,
                 flow.category,
                 flow.protocol or "",
                 flow.tx_bytes + flow.rx_bytes,
@@ -486,11 +586,15 @@ async def export_flows(format: str, _: Authed, db: Db) -> StreamingResponse:
 async def topology(
     _: Authed, db: Db, hours: int = Query(24, ge=1, le=720), hide_inactive: bool = False
 ) -> dict[str, Any]:
-    query = select(Device, LocalMetadata).outerjoin(LocalMetadata)
+    query = (
+        select(Device, LocalMetadata, TailnetUser)
+        .outerjoin(LocalMetadata)
+        .outerjoin(TailnetUser, Device.owner_id == TailnetUser.id)
+    )
     if hide_inactive:
         query = query.where(Device.online.is_(True))
     rows = (await db.execute(query)).all()
-    nodes = [device_dict(d, m) for d, m in rows if not (m and m.hidden)]
+    nodes = [device_dict(d, m, owner) for d, m, owner in rows if not (m and m.hidden)]
     node_ids = {n["id"] for n in nodes}
     flow_rows = (
         await db.execute(
@@ -588,6 +692,34 @@ async def policy_review(_: Authed, db: Db) -> dict[str, Any]:
     if not snapshot:
         return {"available": False, "status": "No valid policy snapshot is available"}
     result = review_policy(snapshot.normalized)
+    return {
+        "available": True,
+        "source_snapshot_id": snapshot.id,
+        "retrieved_at": snapshot.retrieved_at,
+        **result,
+    }
+
+
+@router.get("/policy/security-review")
+async def policy_security_review(_: Authed, db: Db) -> dict[str, Any]:
+    snapshot = await db.scalar(
+        select(PolicySnapshot)
+        .where(PolicySnapshot.valid.is_(True))
+        .order_by(PolicySnapshot.retrieved_at.desc())
+        .limit(1)
+    )
+    if not snapshot:
+        return {"available": False, "status": "No valid policy snapshot is available"}
+    devices = (await db.execute(select(Device))).scalars().all()
+    tail_users = (await db.execute(select(TailnetUser))).scalars().all()
+    result = security_review_policy(
+        snapshot.normalized,
+        [device_dict(device) for device in devices],
+        [
+            {"id": user.id, "login_name": user.login_name, "display_name": user.display_name}
+            for user in tail_users
+        ],
+    )
     return {
         "available": True,
         "source_snapshot_id": snapshot.id,
