@@ -361,8 +361,8 @@ export function DeviceTable({
 
 export function Topology() {
   const [selected, setSelected] = useState<Device | null>(null);
-  const [showPolicy, setShowPolicy] = useState(true);
-  const [showObserved, setShowObserved] = useState(true);
+  const [showPolicy, setShowPolicy] = useState(false);
+  const [showObserved, setShowObserved] = useState(false);
   const [layout, setLayout] = useState("cose");
   const [search, setSearch] = useState("");
   const query = useQuery({
