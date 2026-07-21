@@ -121,6 +121,11 @@ class Flow(Base):
     __table_args__ = (
         UniqueConstraint("fingerprint", name="uq_flow_fingerprint"),
         Index("ix_flows_time_pair", "start", "source_device_id", "destination_device_id"),
+        Index("ix_flows_source_category_end", "source_device_id", "category", "end"),
+        Index("ix_flows_start_id", "start", "id"),
+        Index("ix_flows_category_start_id", "category", "start", "id"),
+        Index("ix_flows_protocol_start_id", "protocol", "start", "id"),
+        Index("ix_flows_destination_port_start_id", "destination_port", "start", "id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     fingerprint: Mapped[str] = mapped_column(String(64))

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     audit_interval_seconds: int = 300
     flow_retention_days: int = 30
     raw_payload_retention_days: int = 7
+    export_row_limit: int = Field(default=10000, ge=1, le=100000)
     trusted_proxies: list[str] = []
     telemetry_secret: str = Field(default="", alias="TAILVIEW_TELEMETRY_SECRET")
 

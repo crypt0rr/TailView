@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "./api";
 import { Button, Loading } from "./components";
+import { useTimeRange } from "./timeRange";
 import {
   Dashboard,
   Devices,
@@ -242,6 +243,7 @@ function Shell({ user }: { user: CurrentUser }) {
   const location = useLocation();
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const { range, setRange } = useTimeRange();
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     localStorage.theme = dark ? "dark" : "light";
@@ -331,7 +333,13 @@ function Shell({ user }: { user: CurrentUser }) {
               <span>Search</span>
               <kbd>⌘ K</kbd>
             </button>
-            <select aria-label="Global time range" defaultValue="24h">
+            <select
+              aria-label="Global time range"
+              value={range}
+              onChange={(event) =>
+                setRange(event.target.value as "1h" | "24h" | "7d" | "30d")
+              }
+            >
               <option value="1h">Last hour</option>
               <option value="24h">Last 24 hours</option>
               <option value="7d">Last 7 days</option>

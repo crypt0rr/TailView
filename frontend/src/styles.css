@@ -747,6 +747,50 @@ aside nav button.active {
   display: flex;
   gap: 7px;
 }
+.toolbar-fields input,
+.toolbar-fields select,
+.filter-panel input,
+.filter-panel select {
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 11px;
+}
+.toolbar-fields {
+  flex-wrap: wrap;
+}
+.filter-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+.filter-panel label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.flow-filters label {
+  min-width: 150px;
+  flex: 1 1 150px;
+}
+.column-picker label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: capitalize;
+}
+.page > .button.secondary {
+  align-self: center;
+}
 .search-field {
   height: 36px;
   display: flex;
@@ -1141,6 +1185,137 @@ td small {
 .copy-row svg {
   width: 13px;
   color: var(--muted);
+}
+.address-row > span,
+.address-row code,
+.address-row small {
+  display: block;
+  text-align: left;
+}
+.address-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.address-range-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+}
+.address-range-row > span {
+  color: var(--muted);
+  font-size: 9px;
+}
+.address-range-row select {
+  margin-left: auto;
+  max-width: 135px;
+}
+.address-range-row small {
+  color: var(--accent);
+  font-size: 8px;
+}
+.address-scope {
+  margin-top: 13px;
+}
+.address-scope-head strong,
+.address-scope-head small {
+  display: block;
+}
+.address-scope-head strong {
+  font-size: 10px;
+}
+.address-scope-head small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 8px;
+}
+.observed-address-card {
+  margin-top: 7px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+.observed-address-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+.observed-address-head code {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.address-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px 10px;
+  margin: 10px 0 0;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+.address-facts dt {
+  color: var(--muted);
+  font-size: 8px;
+}
+.address-facts dd {
+  margin: 2px 0 0;
+  font-size: 9px;
+}
+.address-observers,
+.address-provenance {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 8px;
+  overflow-wrap: anywhere;
+}
+.address-provenance {
+  margin-top: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.address-reliability {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--warning) 7%, transparent);
+}
+.address-reliability svg {
+  width: 15px;
+  color: var(--warning);
+  flex: none;
+}
+.address-reliability p,
+.address-empty p,
+.address-caveat {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+.address-empty {
+  padding: 14px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+  text-align: center;
+}
+.address-empty strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 10px;
+}
+.address-caveat {
+  margin-top: 9px;
 }
 .route {
   display: block;
@@ -1660,9 +1835,11 @@ td small {
   }
   .breadcrumb,
   .search-button span,
-  .search-button kbd,
-  .header-actions select {
+  .search-button kbd {
     display: none;
+  }
+  .header-actions select {
+    max-width: 96px;
   }
   .search-button {
     min-width: 34px;

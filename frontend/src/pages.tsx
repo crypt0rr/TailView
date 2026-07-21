@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import cytoscape from "cytoscape";
 import {
@@ -12,7 +12,6 @@ import {
   Copy,
   Download,
   Eye,
-  Filter,
   Scan,
   GitCompareArrows,
   KeyRound,
@@ -42,6 +41,7 @@ import {
   YAxis,
 } from "recharts";
 import { request } from "./api";
+import { useTimeRange } from "./timeRange";
 import {
   Badge,
   Button,
@@ -55,7 +55,15 @@ import {
   roleIcon,
   statusIcon,
 } from "./components";
-import type { Device, Page, TopologyData } from "./types";
+import type {
+  AddressInventory,
+  Device,
+  FlowRecord,
+  FlowSummary,
+  ObservedPhysicalEndpoint,
+  Page,
+  TopologyData,
+} from "./types";
 
 const palette = [
   "#5be7c4",
@@ -67,9 +75,10 @@ const palette = [
 ];
 
 export function Dashboard() {
+  const { hours } = useTimeRange();
   const query = useQuery({
-    queryKey: ["dashboard"],
-    queryFn: () => request<Record<string, any>>("/dashboard"),
+    queryKey: ["dashboard", hours],
+    queryFn: () => request<Record<string, any>>(`/dashboard?hours=${hours}`),
   });
   if (query.isLoading) return <Loading />;
   if (query.error) return <ErrorState error={query.error} />;
@@ -111,7 +120,7 @@ export function Dashboard() {
               </Badge>
             }
           />
-          <TrafficChart />
+          <TrafficChart data={d.traffic_series ?? []} />
         </Card>
         <Card className="chart-card">
           <CardHead
@@ -194,14 +203,15 @@ export function Dashboard() {
   );
 }
 
-function TrafficChart() {
-  const data = Array.from({ length: 24 }, (_, i) => ({
-    time: `${String(i).padStart(2, "0")}:00`,
-    reported: Math.round(8 + Math.sin(i / 3) * 4 + (i % 5) * 1.4),
-  }));
+export function TrafficChart({
+  data,
+}: {
+  data: Array<{ bucket_start: string; reported_bytes: number }>;
+}) {
+  const chartData = trafficChartData(data);
   return (
     <ResponsiveContainer width="100%" height={260}>
-      <AreaChart data={data}>
+      <AreaChart data={chartData}>
         <defs>
           <linearGradient id="traffic" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0" stopColor="#5be7c4" stopOpacity={0.35} />
@@ -228,18 +238,56 @@ function TrafficChart() {
   );
 }
 
+export function trafficChartData(
+  data: Array<{ bucket_start: string; reported_bytes: number }>,
+) {
+  return data.map((point) => ({
+    time: new Date(point.bucket_start).toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+    reported: point.reported_bytes / 1e6,
+  }));
+}
+
 export function Devices({ role = "" }: { role?: string }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedDevice = searchParams.get("device");
-  const [search, setSearch] = useState("");
-  const [selected, setSelected] = useState<Device | null>(null);
-  const query = useQuery({
-    queryKey: ["devices", search, role],
-    queryFn: () =>
-      request<Page<Device>>(
-        `/devices?search=${encodeURIComponent(search)}&role=${encodeURIComponent(role)}`,
-      ),
+  const [search, setSearch] = useState(searchParams.get("search") ?? "");
+  const [statusFilter, setStatusFilter] = useState(searchParams.get("status") ?? "");
+  const [owner, setOwner] = useState(searchParams.get("owner") ?? "");
+  const [showColumns, setShowColumns] = useState(false);
+  const [columns, setColumns] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem("tailview.deviceColumns");
+      return saved ? (JSON.parse(saved) as Record<string, boolean>) : {};
+    } catch {
+      return {};
+    }
   });
+  const [selected, setSelected] = useState<Device | null>(null);
+  const deviceParams = useMemo(() => {
+    const params = new URLSearchParams({ search, role });
+    if (statusFilter) params.set("status", statusFilter);
+    if (owner) params.set("owner", owner);
+    return params;
+  }, [owner, role, search, statusFilter]);
+  const query = useInfiniteQuery({
+    queryKey: ["devices", search, role, statusFilter, owner],
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams(deviceParams);
+      if (pageParam) params.set("cursor", pageParam);
+      return request<Page<Device>>(`/devices?${params}`);
+    },
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+  });
+  const devices = useMemo(
+    () => query.data?.pages.flatMap((page) => page.items) ?? [],
+    [query.data?.pages],
+  );
   const requestedDeviceQuery = useQuery({
     queryKey: ["device", requestedDevice],
     queryFn: () => request<Device & { flows: any[] }>(`/devices/${requestedDevice}`),
@@ -247,21 +295,49 @@ export function Devices({ role = "" }: { role?: string }) {
   });
   useEffect(() => {
     if (!requestedDevice) return;
-    const device = query.data?.items.find((item) => item.id === requestedDevice);
+    const device = devices.find((item) => item.id === requestedDevice);
     if (device) {
       setSelected(device);
     } else if (requestedDeviceQuery.data) {
       setSelected(requestedDeviceQuery.data);
     }
-  }, [query.data, requestedDevice, requestedDeviceQuery.data]);
+  }, [devices, requestedDevice, requestedDeviceQuery.data]);
+  const updateParams = (updates: Record<string, string | null>) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      Object.entries(updates).forEach(([key, value]) => {
+        if (value) next.set(key, value);
+        else next.delete(key);
+      });
+      return next;
+    });
+  };
   const selectDevice = (device: Device) => {
     setSelected(device);
-    setSearchParams({ device: device.id });
+    updateParams({ device: device.id });
   };
   const closeDevice = () => {
     setSelected(null);
-    setSearchParams({});
+    updateParams({ device: null });
   };
+  const setDeviceSearch = (value: string) => {
+    setSearch(value);
+    updateParams({ search: value || null });
+  };
+  const setDeviceStatus = (value: string) => {
+    setStatusFilter(value);
+    updateParams({ status: value || null });
+  };
+  const setDeviceOwner = (value: string) => {
+    setOwner(value);
+    updateParams({ owner: value || null });
+  };
+  const toggleColumn = (column: string) => {
+    const next = { ...columns, [column]: columns[column] === false };
+    setColumns(next);
+    localStorage.setItem("tailview.deviceColumns", JSON.stringify(next));
+  };
+  const exportUrl = `/api/v1/devices/export.csv?${deviceParams}`;
   return (
     <div className="page">
       <PageHead
@@ -269,23 +345,78 @@ export function Devices({ role = "" }: { role?: string }) {
         title={role ? role.replaceAll("_", " ") : "Devices"}
         description="API-derived device state with local metadata kept visibly separate."
         actions={
-          <Button variant="secondary">
+          <a className="button secondary" href={exportUrl}>
             <Download /> Export CSV
-          </Button>
+          </a>
         }
       />
-      <Toolbar search={search} setSearch={setSearch} />
+      <div className="toolbar inventory-toolbar">
+        <label className="search-field">
+          <Search />
+          <input
+            placeholder="Search devices, owners, or operating systems…"
+            value={search}
+            onChange={(event) => setDeviceSearch(event.target.value)}
+          />
+        </label>
+        <div className="toolbar-fields">
+          <select
+            aria-label="Device status filter"
+            value={statusFilter}
+            onChange={(event) => setDeviceStatus(event.target.value)}
+          >
+            <option value="">All statuses</option>
+            <option value="online">Online</option>
+            <option value="offline">Offline</option>
+            <option value="unknown">Not reported</option>
+          </select>
+          <input
+            aria-label="Device owner filter"
+            placeholder="Filter owner…"
+            value={owner}
+            onChange={(event) => setDeviceOwner(event.target.value)}
+          />
+          <Button variant="secondary" onClick={() => setShowColumns((value) => !value)}>
+            <Eye /> Columns
+          </Button>
+        </div>
+      </div>
+      {showColumns && (
+        <div className="filter-panel column-picker" aria-label="Device columns">
+          {["status", "role", "owner", "os", "addresses", "last_seen"].map((column) => (
+            <label key={column}>
+              <input
+                type="checkbox"
+                checked={columns[column] !== false}
+                onChange={() => toggleColumn(column)}
+              />
+              {column.replaceAll("_", " ")}
+            </label>
+          ))}
+        </div>
+      )}
       {query.isLoading ? (
         <Loading />
       ) : query.error ? (
         <ErrorState error={query.error} />
-      ) : !query.data?.items.length ? (
+      ) : !devices.length ? (
         <Empty
           title="No devices found"
           detail="Adjust filters or check device synchronization."
         />
       ) : (
-        <DeviceTable devices={query.data.items} onSelect={selectDevice} />
+        <>
+          <DeviceTable devices={devices} onSelect={selectDevice} columns={columns} />
+          {query.hasNextPage && (
+            <Button
+              variant="secondary"
+              onClick={() => void query.fetchNextPage()}
+              disabled={query.isFetchingNextPage}
+            >
+              {query.isFetchingNextPage ? "Loading…" : "Load more devices"}
+            </Button>
+          )}
+        </>
       )}
       {selected && (
         <NodeDrawer device={selected} close={closeDevice} />
@@ -296,9 +427,11 @@ export function Devices({ role = "" }: { role?: string }) {
 export function DeviceTable({
   devices,
   onSelect,
+  columns = {},
 }: {
   devices: Device[];
   onSelect: (device: Device) => void;
+  columns?: Record<string, boolean>;
 }) {
   return (
     <Card className="table-card">
@@ -307,12 +440,12 @@ export function DeviceTable({
           <thead>
             <tr>
               <th>Device</th>
-              <th>Status</th>
-              <th>Role</th>
-              <th>Owner</th>
-              <th>OS / Version</th>
-              <th>Addresses</th>
-              <th>Last seen</th>
+              {columns.status !== false && <th>Status</th>}
+              {columns.role !== false && <th>Role</th>}
+              {columns.owner !== false && <th>Owner</th>}
+              {columns.os !== false && <th>OS / Version</th>}
+              {columns.addresses !== false && <th>Addresses</th>}
+              {columns.last_seen !== false && <th>Last seen</th>}
               <th />
             </tr>
           </thead>
@@ -351,26 +484,26 @@ export function DeviceTable({
                     </span>
                   </button>
                 </td>
-                <td>
+                {columns.status !== false && <td>
                   <Status online={d.online} />
-                </td>
-                <td>
+                </td>}
+                {columns.role !== false && <td>
                   <Badge>{d.primary_role.replaceAll("_", " ")}</Badge>
                   {d.roles.length > 1 && (
                     <small className="more">+{d.roles.length - 1}</small>
                   )}
-                </td>
-                <td>
+                </td>}
+                {columns.owner !== false && <td>
                   <OwnerLink device={d} />
-                </td>
-                <td>
+                </td>}
+                {columns.os !== false && <td>
                   <strong>{d.os}</strong>
                   <small className="block">{d.version || "Not reported"}</small>
-                </td>
-                <td>
+                </td>}
+                {columns.addresses !== false && <td>
                   <code>{d.addresses[0] ?? "—"}</code>
-                </td>
-                <td>{relativeTime(d.last_seen)}</td>
+                </td>}
+                {columns.last_seen !== false && <td>{relativeTime(d.last_seen)}</td>}
                 <td>
                   <button
                     type="button"
@@ -394,14 +527,15 @@ export function DeviceTable({
 }
 
 export function Topology() {
+  const { hours } = useTimeRange();
   const [selected, setSelected] = useState<Device | null>(null);
   const [showPolicy, setShowPolicy] = useState(false);
   const [showObserved, setShowObserved] = useState(false);
   const [layout, setLayout] = useState("cose");
   const [search, setSearch] = useState("");
   const query = useQuery({
-    queryKey: ["topology"],
-    queryFn: () => request<TopologyData>("/topology"),
+    queryKey: ["topology", hours],
+    queryFn: () => request<TopologyData>(`/topology?hours=${hours}`),
   });
   const container = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
@@ -595,9 +729,14 @@ export function Topology() {
 }
 
 function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
+  const [addressHours, setAddressHours] = useState<24 | 168 | 720>(168);
   const detail = useQuery({
-    queryKey: ["device", device.id],
-    queryFn: () => request<Device & { flows: any[] }>(`/devices/${device.id}`),
+    queryKey: ["device", device.id, addressHours],
+    queryFn: () =>
+      request<Device & { flows: any[] }>(
+        `/devices/${device.id}?address_hours=${addressHours}`,
+      ),
+    placeholderData: (previous) => previous,
   });
   const d = detail.data ?? device;
   const [tab, setTab] = useState("overview");
@@ -658,18 +797,13 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
               />
               <Detail label="Source" value={d.source} />
             </DetailGroup>
-            <DetailGroup title="Addresses">
-              {d.addresses.map((a) => (
-                <button
-                  className="copy-row"
-                  key={a}
-                  onClick={() => navigator.clipboard.writeText(a)}
-                >
-                  <code>{a}</code>
-                  <Copy />
-                </button>
-              ))}
-            </DetailGroup>
+            <AddressInventoryView
+              inventory={d.address_inventory}
+              fallbackAddresses={d.addresses}
+              addressHours={addressHours}
+              setAddressHours={setAddressHours}
+              refreshing={detail.isFetching}
+            />
             <DetailGroup title="Classification">
               <div className="badge-row">
                 {d.roles.map((r) => (
@@ -734,6 +868,193 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
       </div>
       </aside>
     </>
+  );
+}
+
+export function AddressInventoryView({
+  inventory,
+  fallbackAddresses,
+  addressHours,
+  setAddressHours,
+  refreshing = false,
+}: {
+  inventory?: AddressInventory;
+  fallbackAddresses: string[];
+  addressHours: 24 | 168 | 720;
+  setAddressHours: (hours: 24 | 168 | 720) => void;
+  refreshing?: boolean;
+}) {
+  const tailnet =
+    inventory?.tailnet ??
+    fallbackAddresses.map((address) => ({
+      address,
+      family: address.includes(":") ? "IPv6" : "IPv4",
+    }));
+  const groups: Array<{
+    title: string;
+    detail: string;
+    items: ObservedPhysicalEndpoint[];
+  }> = [
+    {
+      title: "Public",
+      detail: "Globally routable candidates",
+      items: inventory?.observed.filter((item) => item.classification === "public") ?? [],
+    },
+    {
+      title: "Private / internal",
+      detail: "RFC1918, ULA, or shared CGNAT candidates",
+      items:
+        inventory?.observed.filter((item) =>
+          ["private", "shared"].includes(item.classification),
+        ) ?? [],
+    },
+    {
+      title: "Special",
+      detail: "Loopback, link-local, multicast, reserved, or unknown",
+      items:
+        inventory?.observed.filter(
+          (item) => !["public", "private", "shared"].includes(item.classification),
+        ) ?? [],
+    },
+  ];
+  return (
+    <>
+      <DetailGroup title="Tailnet addresses">
+        {tailnet.map((item) => (
+          <button
+            className="copy-row address-row"
+            key={item.address}
+            aria-label={`Copy Tailnet address ${item.address}`}
+            onClick={() => navigator.clipboard.writeText(item.address)}
+          >
+            <span>
+              <code>{item.address}</code>
+              <small>{item.family} · Device API</small>
+            </span>
+            <Copy />
+          </button>
+        ))}
+      </DetailGroup>
+      <DetailGroup title="Observed physical endpoints">
+        <div className="address-range-row">
+          <span>Observation range</span>
+          <select
+            aria-label="Observed endpoint range"
+            value={addressHours}
+            onChange={(event) =>
+              setAddressHours(Number(event.target.value) as 24 | 168 | 720)
+            }
+          >
+            <option value={24}>Last 24 hours</option>
+            <option value={168}>Last 7 days</option>
+            <option value={720}>Last 30 days</option>
+          </select>
+          {refreshing && <small>Refreshing…</small>}
+        </div>
+        {!inventory ? (
+          <p className="muted">Loading observed endpoint candidates…</p>
+        ) : inventory.status === "capability_unavailable" ? (
+          <AddressEmpty
+            title="Flow logs unavailable"
+            detail={`Capability status: ${inventory.capability_status.replaceAll("_", " ")}.`}
+          />
+        ) : inventory.status === "retention_limited" ? (
+          <AddressEmpty
+            title="Range exceeds retention"
+            detail={`TailView currently retains ${inventory.retention_days} days of flow records.`}
+          />
+        ) : inventory.status === "no_observations" ? (
+          <AddressEmpty
+            title="No endpoint candidates observed"
+            detail="No attributable physical-flow endpoints were retained in this range."
+          />
+        ) : (
+          groups
+            .filter((group) => group.items.length > 0)
+            .map((group) => (
+              <section className="address-scope" key={group.title}>
+                <div className="address-scope-head">
+                  <strong>{group.title}</strong>
+                  <small>{group.detail}</small>
+                </div>
+                {group.items.map((item) => (
+                  <ObservedEndpointCard endpoint={item} key={item.address} />
+                ))}
+              </section>
+            ))
+        )}
+        {inventory?.truncated && (
+          <p className="address-caveat">
+            Results are based on the 20,000 most recent matching flow rows.
+          </p>
+        )}
+        <div className="address-reliability">
+          <AlertTriangle />
+          <p>
+            {inventory?.notice ??
+              "Physical endpoints are historical, client-reported candidates—not authoritative device interface addresses."}
+          </p>
+        </div>
+      </DetailGroup>
+    </>
+  );
+}
+
+function ObservedEndpointCard({ endpoint }: { endpoint: ObservedPhysicalEndpoint }) {
+  return (
+    <div className="observed-address-card">
+      <div className="observed-address-head">
+        <div>
+          <code>{endpoint.address}</code>
+          <div className="badge-row">
+            <Badge tone={endpoint.classification === "public" ? "warning" : undefined}>
+              {endpoint.classification.replaceAll("_", " ")}
+            </Badge>
+            <Badge>{endpoint.family}</Badge>
+          </div>
+        </div>
+        <button
+          className="icon-button"
+          aria-label={`Copy observed endpoint ${endpoint.address}`}
+          onClick={() => navigator.clipboard.writeText(endpoint.address)}
+        >
+          <Copy />
+        </button>
+      </div>
+      <dl className="address-facts">
+        <div>
+          <dt>Ports</dt>
+          <dd>{endpoint.ports.length ? endpoint.ports.join(", ") : "Not reported"}</dd>
+        </div>
+        <div>
+          <dt>Last observed</dt>
+          <dd>{relativeTime(endpoint.last_observed_at)}</dd>
+        </div>
+        <div>
+          <dt>Observers</dt>
+          <dd>{endpoint.observer_count}</dd>
+        </div>
+        <div>
+          <dt>Reported volume</dt>
+          <dd>{formatBytes(endpoint.reported_bytes)}</dd>
+        </div>
+      </dl>
+      {endpoint.observers.length > 0 && (
+        <small className="address-observers">
+          Reported by {endpoint.observers.map((observer) => observer.name).join(", ")}
+        </small>
+      )}
+      <small className="address-provenance">Physical flow logs · unverified</small>
+    </div>
+  );
+}
+
+function AddressEmpty({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="address-empty">
+      <strong>{title}</strong>
+      <p>{detail}</p>
+    </div>
   );
 }
 function AccessSummary() {
@@ -805,25 +1126,84 @@ function FlowSummary({ flows }: { flows: any[] }) {
 }
 
 export function Flows() {
-  const [category, setCategory] = useState("");
-  const query = useQuery({
-    queryKey: ["flows", category],
-    queryFn: () => request<Page<any>>(`/flows?category=${category}`),
-  });
-  const rows = useMemo(() => query.data?.items ?? [], [query.data?.items]);
-  const chart = useMemo(() => {
-    const buckets = new Map<string, number>();
-    rows.forEach((f) => {
-      const key = new Date(f.start).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-      buckets.set(key, (buckets.get(key) ?? 0) + f.reported_bytes);
+  const { hours } = useTimeRange();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [category, setCategory] = useState(searchParams.get("category") ?? "");
+  const [source, setSource] = useState(searchParams.get("source") ?? "");
+  const [destination, setDestination] = useState(searchParams.get("destination") ?? "");
+  const [protocol, setProtocol] = useState(searchParams.get("protocol") ?? "");
+  const [port, setPort] = useState(searchParams.get("port") ?? "");
+  const [resolution, setResolution] = useState(searchParams.get("resolution") ?? "all");
+  const [showFilters, setShowFilters] = useState(
+    Boolean(source || destination || protocol || port || resolution !== "all"),
+  );
+  const filterParams = useMemo(() => {
+    const params = new URLSearchParams({ hours: String(hours) });
+    if (category) params.set("category", category);
+    if (source) params.set("source", source);
+    if (destination) params.set("destination", destination);
+    if (protocol) params.set("protocol", protocol);
+    if (port) params.set("port", port);
+    if (resolution !== "all") params.set("resolution", resolution);
+    return params;
+  }, [category, destination, hours, port, protocol, resolution, source]);
+  const updateFilter = (key: string, value: string) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (value && value !== "all") next.set(key, value);
+      else next.delete(key);
+      return next;
     });
-    return [...buckets]
-      .reverse()
-      .map(([time, bytes]) => ({ time, mb: bytes / 1e6 }));
-  }, [rows]);
+  };
+  const query = useInfiniteQuery({
+    queryKey: ["flows", filterParams.toString()],
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams(filterParams);
+      if (pageParam) params.set("cursor", pageParam);
+      return request<Page<FlowRecord>>(`/flows?${params}`);
+    },
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+  });
+  const summary = useQuery({
+    queryKey: ["flows-summary", filterParams.toString()],
+    queryFn: () => request<FlowSummary>(`/flows/summary?${filterParams}`),
+  });
+  const rows = useMemo(
+    () => query.data?.pages.flatMap((page) => page.items) ?? [],
+    [query.data?.pages],
+  );
+  const chart = useMemo(
+    () =>
+      (summary.data?.series ?? []).map((point) => ({
+        time: new Date(point.bucket_start).toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        mb: point.reported_bytes / 1e6,
+      })),
+    [summary.data?.series],
+  );
+  const setCategoryFilter = (value: string) => {
+    setCategory(value);
+    updateFilter("category", value);
+  };
+  const clearAdvancedFilters = () => {
+    setSource("");
+    setDestination("");
+    setProtocol("");
+    setPort("");
+    setResolution("all");
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      ["source", "destination", "protocol", "port", "resolution"].forEach((key) =>
+        next.delete(key),
+      );
+      return next;
+    });
+  };
   return (
     <div className="page">
       <PageHead
@@ -831,7 +1211,7 @@ export function Flows() {
         title="Flow explorer"
         description="Historical, client-reported traffic windows. Not active sessions."
         actions={
-          <a className="button secondary" href="/api/v1/flows/export.csv">
+          <a className="button secondary" href={`/api/v1/flows/export.csv?${filterParams}`}>
             <Download /> Export CSV
           </a>
         }
@@ -847,7 +1227,11 @@ export function Flows() {
       <Card className="chart-card">
         <CardHead
           title="Reported traffic volume"
-          detail="TX + RX bytes from retrieved flow windows"
+          detail={
+            summary.data
+              ? `${formatBytes(summary.data.reported_bytes)} across ${summary.data.record_count.toLocaleString()} matching records`
+              : "TX + RX bytes from matching retrieved flow windows"
+          }
         />
         <ResponsiveContainer width="100%" height={220}>
           <AreaChart data={chart}>
@@ -868,24 +1252,94 @@ export function Flows() {
             <button
               key={c}
               className={category === c ? "active" : ""}
-              onClick={() => setCategory(c)}
+              onClick={() => setCategoryFilter(c)}
             >
               {c || "All categories"}
             </button>
           ))}
         </div>
-        <Button variant="secondary">
+        <Button variant="secondary" onClick={() => setShowFilters((value) => !value)}>
           <SlidersHorizontal /> More filters
         </Button>
       </div>
+      {showFilters && (
+        <div className="filter-panel flow-filters" aria-label="Flow filters">
+          <label>
+            Source
+            <input
+              value={source}
+              placeholder="Name, ID, or address"
+              onChange={(event) => {
+                setSource(event.target.value);
+                updateFilter("source", event.target.value);
+              }}
+            />
+          </label>
+          <label>
+            Destination
+            <input
+              value={destination}
+              placeholder="Name, ID, or address"
+              onChange={(event) => {
+                setDestination(event.target.value);
+                updateFilter("destination", event.target.value);
+              }}
+            />
+          </label>
+          <label>
+            Protocol number
+            <input
+              type="number"
+              min="0"
+              max="255"
+              value={protocol}
+              onChange={(event) => {
+                setProtocol(event.target.value);
+                updateFilter("protocol", event.target.value);
+              }}
+            />
+          </label>
+          <label>
+            Port
+            <input
+              type="number"
+              min="1"
+              max="65535"
+              value={port}
+              onChange={(event) => {
+                setPort(event.target.value);
+                updateFilter("port", event.target.value);
+              }}
+            />
+          </label>
+          <label>
+            Resolution
+            <select
+              value={resolution}
+              onChange={(event) => {
+                setResolution(event.target.value);
+                updateFilter("resolution", event.target.value);
+              }}
+            >
+              <option value="all">All records</option>
+              <option value="resolved">Both endpoints resolved</option>
+              <option value="unresolved">At least one unresolved</option>
+            </select>
+          </label>
+          <Button variant="ghost" onClick={clearAdvancedFilters}>Clear filters</Button>
+        </div>
+      )}
       {query.isLoading ? (
         <Loading />
       ) : query.error ? (
         <ErrorState error={query.error} />
+      ) : !rows.length ? (
+        <Empty title="No flow records found" detail="Adjust the range or filters." />
       ) : (
-        <Card className="table-card">
-          <div className="table-scroll">
-            <table>
+        <>
+          <Card className="table-card">
+            <div className="table-scroll">
+              <table>
               <thead>
                 <tr>
                   <th>Observed window</th>
@@ -946,9 +1400,19 @@ export function Flows() {
                   </tr>
                 ))}
               </tbody>
-            </table>
-          </div>
-        </Card>
+              </table>
+            </div>
+          </Card>
+          {query.hasNextPage && (
+            <Button
+              variant="secondary"
+              onClick={() => void query.fetchNextPage()}
+              disabled={query.isFetchingNextPage}
+            >
+              {query.isFetchingNextPage ? "Loading…" : "Load more flows"}
+            </Button>
+          )}
+        </>
       )}
     </div>
   );
@@ -1542,34 +2006,6 @@ function CardHead({
         <p>{detail}</p>
       </div>
       {action}
-    </div>
-  );
-}
-function Toolbar({
-  search,
-  setSearch,
-}: {
-  search: string;
-  setSearch: (s: string) => void;
-}) {
-  return (
-    <div className="toolbar">
-      <label className="search-field">
-        <Search />
-        <input
-          placeholder="Search inventory…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </label>
-      <div>
-        <Button variant="secondary">
-          <Filter /> Filters
-        </Button>
-        <Button variant="secondary">
-          <Eye /> Columns
-        </Button>
-      </div>
     </div>
   );
 }

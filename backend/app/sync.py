@@ -362,6 +362,17 @@ async def sync_logs(kind: str) -> None:
         end = datetime.now(UTC)
         start = end - timedelta(minutes=11)
         processed = 0
+        capability_name = "network_flow_logs" if kind == "flows" else "configuration_audit_logs"
+        capability_source = (
+            "Tailscale network flow logs"
+            if kind == "flows"
+            else "Tailscale configuration audit logs"
+        )
+        capability_requirement = (
+            "logs:network:read; eligible plan and logging enabled"
+            if kind == "flows"
+            else "logs:configuration:read"
+        )
         try:
             logs = await (client.flows(start, end) if kind == "flows" else client.audit(start, end))
             await record_payload(session, kind, logs)
@@ -436,9 +447,26 @@ async def sync_logs(kind: str) -> None:
                             processed += 1
             job.status = "success"
             job.processed = processed
+            capability = await session.get(Capability, capability_name) or Capability(
+                name=capability_name, source=capability_source
+            )
+            capability.status = "available"
+            capability.requirement = capability_requirement
+            capability.detail = ""
+            capability.last_success = datetime.now(UTC)
+            capability.checked_at = datetime.now(UTC)
+            session.add(capability)
         except TailscaleError as exc:
             job.status = "failed"
             job.error = f"Upstream returned HTTP {exc.status}"
+            capability = await session.get(Capability, capability_name) or Capability(
+                name=capability_name, source=capability_source
+            )
+            capability.status = capability_status(exc)
+            capability.requirement = capability_requirement
+            capability.detail = f"Upstream returned HTTP {exc.status}"
+            capability.checked_at = datetime.now(UTC)
+            session.add(capability)
         except Exception as exc:
             await session.rollback()
             persisted_job = await session.get(SyncJob, job_id)
@@ -448,6 +476,14 @@ async def sync_logs(kind: str) -> None:
             job = persisted_job
             job.status = "failed"
             job.error = f"Ingestion failed ({type(exc).__name__})"
+            capability = await session.get(Capability, capability_name) or Capability(
+                name=capability_name, source=capability_source
+            )
+            capability.status = "upstream_error"
+            capability.requirement = capability_requirement
+            capability.detail = f"Ingestion failed ({type(exc).__name__})"
+            capability.checked_at = datetime.now(UTC)
+            session.add(capability)
             log.exception("sync_ingestion_failed", kind=kind, error_type=type(exc).__name__)
         finally:
             job.finished_at = datetime.now(UTC)

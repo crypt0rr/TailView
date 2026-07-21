@@ -21,3 +21,10 @@ Network logs have no pagination or maximum page size. Requests therefore use bou
 
 Capability status values are `available`, `permission_denied`, `feature_disabled`, `plan_unavailable`, `unsupported`, `upstream_error`, and `unknown`. TailView uses a precise value only when the upstream response supports it.
 
+## Device address provenance
+
+The device API supplies Tailnet IPv4 and IPv6 addresses but does not supply authoritative LAN-interface or public-WAN addresses. TailView displays those API values separately as **Tailnet addresses**.
+
+For device troubleshooting, TailView can also summarize physical endpoint candidates from retained network flow logs. A candidate is attributed only when the physical-flow source resolves to the selected device's synchronized Tailnet address. Candidates are grouped by IP and classified locally; no reverse DNS, geolocation, active probing, or external enrichment is performed.
+
+Physical endpoint values remain client-reported and unverified. They may represent NAT mappings, relay infrastructure, temporary ports, or spoofed data, so TailView never labels them as authoritative device interface addresses. The verified reporting-node ID, observation window, ports, volume, and provenance remain attached to the summary.

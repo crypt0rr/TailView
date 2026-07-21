@@ -10,6 +10,7 @@ TailView is a self-hosted, read-only observability dashboard for a Tailscale tai
 - Device/user inventory with multi-role classification, routes, tags, local metadata, saved-view schema, and provenance.
 - Interactive Cytoscape topology with observed and policy-permitted layers, layouts, filtering, selection, and a details drawer.
 - Flow explorer, reported-volume charts, CSV/JSON export, unresolved destinations, and virtual/subnet/exit/physical categories.
+- Real PostgreSQL-backed traffic time series, shared 1-hour/24-hour/7-day/30-day ranges, keyset pagination, and filter-matched exports.
 - Read-only HuJSON policy snapshots, normalized Grants/ACL sections, selector expansion, and explicit incomplete/unsupported results.
 - Configuration audit events, synchronization history, independent capability states, Prometheus metrics, and structured logs.
 - Isolated demo mode and an explicitly opt-in local telemetry profile.
@@ -65,6 +66,8 @@ cd frontend && npm ci && npm run dev
 ```
 
 Python 3.13 is required for local backend work. The Docker build supplies the correct runtime when the host does not.
+
+`EXPORT_ROW_LIMIT` controls the maximum number of matching records in CSV and JSON exports and defaults to 10,000. Export responses include limit and truncation headers.
 
 ## Deployment
 
