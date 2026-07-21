@@ -15,6 +15,7 @@ export interface Device {
   last_seen: string | null;
   created: string | null;
   key_expiry: string | null;
+  key_expiry_disabled: boolean | null;
   addresses: string[];
   tags: string[];
   advertised_routes: string[];

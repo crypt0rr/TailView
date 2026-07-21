@@ -432,6 +432,7 @@ export function Devices({ role = "" }: { role?: string }) {
             <option value="within_14_days">Expiring within 14 days</option>
             <option value="expired">Already expired</option>
             <option value="valid">Valid beyond 14 days</option>
+            <option value="disabled">Expiry disabled</option>
             <option value="not_reported">Expiry not reported</option>
           </select>
           <input
@@ -568,7 +569,7 @@ export function DeviceTable({
                 {columns.addresses !== false && <td>
                   <code>{d.addresses[0] ?? "—"}</code>
                 </td>}
-                {columns.key_expiry !== false && <td><KeyExpiryCell value={d.key_expiry} /></td>}
+                {columns.key_expiry !== false && <td><KeyExpiryCell value={d.key_expiry} disabled={d.key_expiry_disabled} /></td>}
                 {columns.last_seen !== false && <td>{relativeTime(d.last_seen)}</td>}
                 <td>
                   <button
@@ -594,9 +595,11 @@ export function DeviceTable({
 
 export function keyExpiryState(
   value: string | null,
+  disabled: boolean | null,
   now = Date.now(),
-): "not_reported" | "expired" | "expiring" | "valid" {
-  if (!value) return "not_reported";
+): "disabled" | "not_reported" | "expired" | "expiring" | "valid" {
+  if (disabled === true) return "disabled";
+  if (disabled !== false || !value) return "not_reported";
   const expiry = new Date(value).getTime();
   if (!Number.isFinite(expiry)) return "not_reported";
   if (expiry < now) return "expired";
@@ -604,8 +607,11 @@ export function keyExpiryState(
   return "valid";
 }
 
-function KeyExpiryCell({ value }: { value: string | null }) {
-  const state = keyExpiryState(value);
+function KeyExpiryCell({ value, disabled }: { value: string | null; disabled: boolean | null }) {
+  const state = keyExpiryState(value, disabled);
+  if (state === "disabled") {
+    return <><Badge tone="success">Expiry disabled</Badge><small className="block">No active deadline</small></>;
+  }
   if (state === "not_reported") return <span className="muted">Not reported</span>;
   const expiry = new Date(value!);
   const date = expiry.toLocaleDateString();

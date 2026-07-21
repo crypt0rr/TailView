@@ -317,6 +317,8 @@ async def _devices_worker(session: AsyncSession, client: TailscaleClient) -> Sou
         device.last_seen = parse_time(item.get("lastSeen"))
         device.created = parse_time(item.get("created"))
         device.key_expiry = parse_time(item.get("expires"))
+        expiry_disabled = item.get("keyExpiryDisabled")
+        device.key_expiry_disabled = expiry_disabled if isinstance(expiry_disabled, bool) else None
         device.addresses = list(item.get("addresses") or [])
         device.tags = list(item.get("tags") or [])
         advertised = list(item.get("advertisedRoutes") or device.advertised_routes or [])

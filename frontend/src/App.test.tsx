@@ -35,6 +35,7 @@ describe("TailView", () => {
       last_seen: "2026-07-21T10:00:00Z",
       created: null,
       key_expiry: null,
+      key_expiry_disabled: null,
       addresses: ["100.64.0.1"],
       tags: [],
       advertised_routes: ["0.0.0.0/0"],
@@ -85,10 +86,12 @@ describe("TailView", () => {
 
   it("distinguishes expiring keys from already expired keys", () => {
     const now = Date.parse("2026-07-21T12:00:00Z");
-    expect(keyExpiryState("2026-07-20T12:00:00Z", now)).toBe("expired");
-    expect(keyExpiryState("2026-07-28T12:00:00Z", now)).toBe("expiring");
-    expect(keyExpiryState("2026-08-21T12:00:00Z", now)).toBe("valid");
-    expect(keyExpiryState(null, now)).toBe("not_reported");
+    expect(keyExpiryState("2026-07-20T12:00:00Z", false, now)).toBe("expired");
+    expect(keyExpiryState("2026-07-28T12:00:00Z", false, now)).toBe("expiring");
+    expect(keyExpiryState("2026-08-21T12:00:00Z", false, now)).toBe("valid");
+    expect(keyExpiryState("2024-01-01T00:00:00Z", true, now)).toBe("disabled");
+    expect(keyExpiryState(null, false, now)).toBe("not_reported");
+    expect(keyExpiryState("2026-07-28T12:00:00Z", null, now)).toBe("not_reported");
   });
 
   it("uses compact, bounded traffic-axis labels", () => {
@@ -139,6 +142,7 @@ describe("TailView", () => {
       last_seen: null,
       created: null,
       key_expiry: null,
+      key_expiry_disabled: null,
       addresses: [],
       tags: [],
       advertised_routes: [],

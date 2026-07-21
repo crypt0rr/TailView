@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import app.sync as sync_module
 from app.models import Base, Device, ServiceHost, TailnetService, WebhookEndpoint
 from app.sync import (
+    _devices_worker,
     _routes_worker,
     _services_worker,
     _webhooks_worker,
@@ -73,6 +74,21 @@ def test_webhook_url_redaction_removes_credentials_query_and_fragment() -> None:
 
 
 class FakeInventoryClient:
+    async def devices(self) -> list[dict[str, object]]:
+        return [
+            {
+                "nodeId": "disabled-device",
+                "name": "disabled.example.ts.net",
+                "expires": "2024-01-01T00:00:00Z",
+                "keyExpiryDisabled": True,
+            },
+            {
+                "nodeId": "unknown-device",
+                "name": "unknown.example.ts.net",
+                "expires": "2026-08-01T00:00:00Z",
+            },
+        ]
+
     async def routes(self, device_id: str) -> dict[str, object]:
         if device_id == "failed":
             raise TailscaleError(403, "denied")
@@ -109,6 +125,23 @@ class FakeInventoryClient:
                 "enabled": True,
             }
         ]
+
+
+@pytest.mark.asyncio
+async def test_devices_normalize_key_expiry_disabled_without_inference() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        assert (await _devices_worker(session, FakeInventoryClient()))[:3] == (2, 2, 0)  # type: ignore[arg-type]
+        await session.commit()
+        disabled = await session.get(Device, "disabled-device")
+        unknown = await session.get(Device, "unknown-device")
+        assert disabled and disabled.key_expiry_disabled is True
+        assert disabled.key_expiry and disabled.key_expiry.date().isoformat() == "2024-01-01"
+        assert unknown and unknown.key_expiry_disabled is None
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

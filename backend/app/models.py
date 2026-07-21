@@ -88,6 +88,7 @@ class Device(Base):
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     key_expiry: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    key_expiry_disabled: Mapped[bool | None] = mapped_column(Boolean)
     addresses: Mapped[list[str]] = mapped_column(JSON, default=list)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     advertised_routes: Mapped[list[str]] = mapped_column(JSON, default=list)

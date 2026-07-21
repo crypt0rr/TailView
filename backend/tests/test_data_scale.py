@@ -276,11 +276,17 @@ async def test_expiring_key_overview_excludes_expired_and_long_lived_keys(db_ses
     now = datetime.now(UTC)
     expired = make_device("expired", "expired.example.ts.net")
     expired.key_expiry = now - timedelta(days=1)
+    expired.key_expiry_disabled = False
     expiring = make_device("expiring", "expiring.example.ts.net")
     expiring.key_expiry = now + timedelta(days=7)
+    expiring.key_expiry_disabled = False
     valid = make_device("valid", "valid.example.ts.net")
     valid.key_expiry = now + timedelta(days=30)
-    db_session.add_all([expired, expiring, valid])
+    valid.key_expiry_disabled = False
+    disabled = make_device("disabled", "disabled.example.ts.net")
+    disabled.key_expiry = now - timedelta(days=365)
+    disabled.key_expiry_disabled = True
+    db_session.add_all([expired, expiring, valid, disabled])
     await db_session.commit()
 
     overview = await dashboard(VIEWER, db_session, hours=24)
@@ -298,3 +304,16 @@ async def test_expiring_key_overview_excludes_expired_and_long_lived_keys(db_ses
 
     assert overview["expiring_keys"] == 1
     assert [item["id"] for item in page["items"]] == ["expiring"]
+
+    disabled_page = await devices(
+        VIEWER,
+        db_session,
+        cursor=None,
+        limit=50,
+        search="",
+        role="",
+        status_filter="",
+        owner="",
+        key_expiry="disabled",
+    )
+    assert [item["id"] for item in disabled_page["items"]] == ["disabled"]

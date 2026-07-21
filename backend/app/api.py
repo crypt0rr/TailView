@@ -94,6 +94,7 @@ def device_dict(
         "last_seen": device.last_seen,
         "created": device.created,
         "key_expiry": device.key_expiry,
+        "key_expiry_disabled": device.key_expiry_disabled,
         "addresses": device.addresses,
         "tags": device.tags,
         "advertised_routes": device.advertised_routes,
@@ -227,6 +228,7 @@ async def dashboard(
             select(func.count())
             .select_from(Device)
             .where(
+                Device.key_expiry_disabled.is_(False),
                 Device.key_expiry.is_not(None),
                 Device.key_expiry >= now,
                 Device.key_expiry <= cutoff,
@@ -315,26 +317,45 @@ def _device_query(
             )
         )
     if key_expiry:
-        allowed_key_expiry = {"within_14_days", "expired", "valid", "not_reported"}
+        allowed_key_expiry = {
+            "within_14_days",
+            "expired",
+            "valid",
+            "disabled",
+            "not_reported",
+        }
         if key_expiry not in allowed_key_expiry:
             raise HTTPException(
                 422,
-                "key_expiry must be within_14_days, expired, valid, or not_reported",
+                "key_expiry must be within_14_days, expired, valid, disabled, or not_reported",
             )
         now = datetime.now(UTC)
         cutoff = now + timedelta(days=14)
         if key_expiry == "within_14_days":
             query = query.where(
+                Device.key_expiry_disabled.is_(False),
                 Device.key_expiry.is_not(None),
                 Device.key_expiry >= now,
                 Device.key_expiry <= cutoff,
             )
         elif key_expiry == "expired":
-            query = query.where(Device.key_expiry.is_not(None), Device.key_expiry < now)
+            query = query.where(
+                Device.key_expiry_disabled.is_(False),
+                Device.key_expiry.is_not(None),
+                Device.key_expiry < now,
+            )
         elif key_expiry == "valid":
-            query = query.where(Device.key_expiry.is_not(None), Device.key_expiry > cutoff)
+            query = query.where(
+                Device.key_expiry_disabled.is_(False),
+                Device.key_expiry.is_not(None),
+                Device.key_expiry > cutoff,
+            )
+        elif key_expiry == "disabled":
+            query = query.where(Device.key_expiry_disabled.is_(True))
         else:
-            query = query.where(Device.key_expiry.is_(None))
+            query = query.where(
+                or_(Device.key_expiry_disabled.is_(None), Device.key_expiry.is_(None))
+            )
     return query, sort_key
 
 
@@ -402,6 +423,7 @@ async def export_devices(
             "version",
             "addresses",
             "key_expiry",
+            "key_expiry_disabled",
             "last_seen",
             "source",
         ]
@@ -423,6 +445,11 @@ async def export_devices(
                 "owner": item["owner_display_name"] or item["owner_login_name"] or "",
                 "addresses": ";".join(item["addresses"]),
                 "key_expiry": item["key_expiry"].isoformat() if item["key_expiry"] else "",
+                "key_expiry_disabled": (
+                    item["key_expiry_disabled"]
+                    if item["key_expiry_disabled"] is not None
+                    else "not_reported"
+                ),
                 "last_seen": item["last_seen"].isoformat() if item["last_seen"] else "",
             }
             yield _csv_line([values.get(column, "") for column in columns])
