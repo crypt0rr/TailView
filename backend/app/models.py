@@ -68,6 +68,7 @@ class TailnetUser(Base):
     login_name: Mapped[str] = mapped_column(String(255), default="", index=True)
     role: Mapped[str] = mapped_column(String(64), default="member")
     status: Mapped[str] = mapped_column(String(64), default="unknown")
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     source: Mapped[str] = mapped_column(String(64), default="tailscale_user_api")
     raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -83,6 +84,7 @@ class Device(Base):
     owner_id: Mapped[str | None] = mapped_column(ForeignKey("tailnet_users.id"), index=True)
     online: Mapped[bool | None] = mapped_column(Boolean)
     authorized: Mapped[bool | None] = mapped_column(Boolean)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     key_expiry: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -190,7 +192,81 @@ class SyncJob(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processed: Mapped[int] = mapped_column(Integer, default=0)
+    attempted: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    partial_success: Mapped[bool] = mapped_column(Boolean, default=False)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+
+
+class TailnetService(Base):
+    __tablename__ = "tailnet_services"
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    addresses: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    ports: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(64), default="unknown", index=True)
+    present: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    source: Mapped[str] = mapped_column(String(64), default="tailscale_services_api")
+    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ServiceHost(Base):
+    __tablename__ = "service_hosts"
+    id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    service_id: Mapped[str] = mapped_column(
+        ForeignKey("tailnet_services.id", ondelete="CASCADE"), index=True
+    )
+    device_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    advertised: Mapped[bool | None] = mapped_column(Boolean)
+    approved: Mapped[bool | None] = mapped_column(Boolean)
+    status: Mapped[str] = mapped_column(String(64), default="unknown", index=True)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ServiceEndpoint(Base):
+    __tablename__ = "service_endpoints"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    service_id: Mapped[str] = mapped_column(
+        ForeignKey("tailnet_services.id", ondelete="CASCADE"), index=True
+    )
+    host_id: Mapped[str | None] = mapped_column(
+        ForeignKey("service_hosts.id", ondelete="CASCADE"), index=True
+    )
+    protocol: Mapped[str] = mapped_column(String(32), default="unknown")
+    port: Mapped[int | None] = mapped_column(Integer)
+    endpoint_type: Mapped[str] = mapped_column(String(32), default="unknown")
+    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DnsConfiguration(Base):
+    __tablename__ = "dns_configurations"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="current")
+    magic_dns: Mapped[bool | None] = mapped_column(Boolean)
+    override_local_dns: Mapped[bool | None] = mapped_column(Boolean)
+    nameservers: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    search_paths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    split_dns: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class WebhookEndpoint(Base):
+    __tablename__ = "webhook_endpoints"
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    url_display: Mapped[str] = mapped_column(Text, default="")
+    subscriptions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    enabled: Mapped[bool | None] = mapped_column(Boolean)
+    present: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    source: Mapped[str] = mapped_column(String(64), default="tailscale_webhooks_api")
+    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Credential(Base):

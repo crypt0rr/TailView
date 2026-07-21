@@ -42,6 +42,7 @@ import {
   InventoryPage,
   Policy,
   SettingsPage,
+  Services,
   Topology,
 } from "./pages";
 
@@ -364,10 +365,7 @@ function Shell({ user }: { user: CurrentUser }) {
             <Route path="/users" element={<InventoryPage kind="users" />} />
             <Route path="/groups" element={<InventoryPage kind="groups" />} />
             <Route path="/routes" element={<InventoryPage kind="routes" />} />
-            <Route
-              path="/services"
-              element={<InventoryPage kind="services" />}
-            />
+            <Route path="/services" element={<Services />} />
             <Route path="/exit-nodes" element={<Devices role="exit_node" />} />
             <Route
               path="/subnet-routers"

@@ -6,7 +6,19 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import AuditEvent, Capability, Device, Flow, PolicySnapshot, TailnetUser
+from .models import (
+    AuditEvent,
+    Capability,
+    Device,
+    DnsConfiguration,
+    Flow,
+    PolicySnapshot,
+    ServiceEndpoint,
+    ServiceHost,
+    TailnetService,
+    TailnetUser,
+    WebhookEndpoint,
+)
 
 
 async def seed_demo(session: AsyncSession) -> None:
@@ -144,6 +156,64 @@ async def seed_demo(session: AsyncSession) -> None:
         ),
     ]
     session.add_all(devices)
+    session.add(
+        TailnetService(
+            id="svc:api",
+            name="svc:api",
+            comment="Synthetic production API Service",
+            addresses=["100.100.100.10"],
+            tags=["tag:prod"],
+            ports=["tcp:443"],
+            status="connected",
+            source="demo",
+            raw={"demo": True},
+        )
+    )
+    await session.flush()
+    session.add(
+        ServiceHost(
+            id="svc:api:n-api",
+            service_id="svc:api",
+            device_id="n-api",
+            advertised=True,
+            approved=True,
+            status="connected",
+            raw={"demo": True},
+        )
+    )
+    await session.flush()
+    session.add(
+        ServiceEndpoint(
+            id=hashlib.sha256(b"svc:api:n-api:tcp:443").hexdigest(),
+            service_id="svc:api",
+            host_id="svc:api:n-api",
+            protocol="tcp",
+            port=443,
+            endpoint_type="tcp",
+            raw={"demo": True},
+        )
+    )
+    session.add(
+        DnsConfiguration(
+            id="current",
+            magic_dns=True,
+            override_local_dns=False,
+            nameservers=["100.100.100.100"],
+            search_paths=["demo.ts.net"],
+            split_dns={},
+            raw={"demo": True},
+        )
+    )
+    session.add(
+        WebhookEndpoint(
+            id="demo-webhook",
+            url_display="https://events.example.test/tailscale",
+            subscriptions=["nodeCreated", "nodeDeleted"],
+            enabled=True,
+            source="demo",
+            raw={"demo": True},
+        )
+    )
     pairs = [
         ("n-laptop", "n-api", 443, 8400000),
         ("n-api", "n-db", 5432, 22000000),
@@ -226,7 +296,7 @@ async def seed_demo(session: AsyncSession) -> None:
         "policy": "policy_file:read plus device read scopes",
         "network_flow_logs": "logs:network:read; Premium or Enterprise; logging enabled",
         "configuration_audit_logs": "logs:configuration:read",
-        "services": "services:read",
+        "services": "all:read (no granular Services scope is documented)",
         "dns": "dns:read",
         "webhooks": "webhooks:read",
         "local_telemetry": "optional agent profile and local Tailscale socket",

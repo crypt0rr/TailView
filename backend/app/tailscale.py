@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -134,8 +135,34 @@ class TailscaleClient:
         body = await self.get(f"/tailnet/{self.tailnet}/services")
         return list(body.get("services", []))
 
+    async def service(self, service_id: str) -> dict[str, Any]:
+        encoded = quote(service_id, safe="")
+        return dict(await self.get(f"/tailnet/{self.tailnet}/services/{encoded}"))
+
+    async def service_hosts(self, service_id: str) -> list[dict[str, Any]]:
+        encoded = quote(service_id, safe="")
+        body = await self.get(f"/tailnet/{self.tailnet}/services/{encoded}/devices")
+        return list(body.get("devices", body.get("hosts", [])))
+
+    async def service_host_approval(self, service_id: str, device_id: str) -> dict[str, Any]:
+        service = quote(service_id, safe="")
+        device = quote(device_id, safe="")
+        return dict(await self.get(f"/tailnet/{self.tailnet}/services/{service}/devices/{device}"))
+
     async def dns(self) -> dict[str, Any]:
-        return dict(await self.get(f"/tailnet/{self.tailnet}/dns/preferences"))
+        prefix = f"/tailnet/{self.tailnet}/dns"
+        preferences, nameservers, search_paths, split_dns = await asyncio.gather(
+            self.get(f"{prefix}/preferences"),
+            self.get(f"{prefix}/nameservers"),
+            self.get(f"{prefix}/searchpaths"),
+            self.get(f"{prefix}/split-dns"),
+        )
+        return {
+            "preferences": preferences,
+            "nameservers": nameservers,
+            "searchPaths": search_paths,
+            "splitDNS": split_dns,
+        }
 
     async def webhooks(self) -> list[dict[str, Any]]:
         body = await self.get(f"/tailnet/{self.tailnet}/webhooks")

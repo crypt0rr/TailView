@@ -38,17 +38,32 @@ from .models import (
     Capability,
     Credential,
     Device,
+    DnsConfiguration,
     Flow,
     LocalMetadata,
     PolicySnapshot,
+    ServiceEndpoint,
+    ServiceHost,
     SyncJob,
+    TailnetService,
     TailnetUser,
     TelemetryObservation,
+    WebhookEndpoint,
 )
 from .policy import evaluate_policy, review_policy, security_review_policy
 from .schemas import CredentialRequest, LoginRequest, MetadataUpdate, SetupRequest, UserResponse
 from .security import SecretBox
-from .sync import sync_inventory, sync_logs, sync_policy
+from .sync import (
+    sync_devices,
+    sync_dns,
+    sync_inventory,
+    sync_logs,
+    sync_policy,
+    sync_routes,
+    sync_services,
+    sync_users,
+    sync_webhooks,
+)
 
 router = APIRouter(prefix="/api/v1")
 Db = Annotated[AsyncSession, Depends(get_db)]
@@ -74,6 +89,8 @@ def device_dict(
         "owner_login_name": owner.login_name if owner and owner.login_name else None,
         "online": device.online,
         "authorized": device.authorized,
+        "active": device.active,
+        "stale": not device.active,
         "last_seen": device.last_seen,
         "created": device.created,
         "key_expiry": device.key_expiry,
@@ -105,6 +122,28 @@ async def device_label_map(db: AsyncSession) -> dict[str, str]:
         )
     ).all()
     return {device_id: display_name or name or device_id for device_id, name, display_name in rows}
+
+
+async def service_address_map(db: AsyncSession) -> dict[str, tuple[str, str]]:
+    """Map only unambiguous, exact official Service addresses."""
+    rows = (
+        await db.execute(
+            select(TailnetService.id, TailnetService.name, TailnetService.addresses).where(
+                TailnetService.present.is_(True)
+            )
+        )
+    ).all()
+    result: dict[str, tuple[str, str]] = {}
+    ambiguous: set[str] = set()
+    for service_id, name, addresses in rows:
+        for address in addresses:
+            if address in result and result[address][0] != service_id:
+                ambiguous.add(address)
+            else:
+                result[address] = (service_id, name)
+    for address in ambiguous:
+        result.pop(address, None)
+    return result
 
 
 def flow_identity(
@@ -200,9 +239,7 @@ async def dashboard(
         func.sum(Flow.tx_bytes + Flow.rx_bytes).label("bytes"),
     ).group_by(Flow.source_device_id, Flow.destination_device_id)
     top_pairs_query = apply_flow_filters(top_pairs_query, filters, now)
-    top_pairs = (
-        await db.execute(top_pairs_query.order_by(desc("bytes")).limit(5))
-    ).all()
+    top_pairs = (await db.execute(top_pairs_query.order_by(desc("bytes")).limit(5))).all()
     traffic_series = await flow_summary_series(db, filters, now=now)
     labels = await device_label_map(db)
     return {
@@ -297,9 +334,7 @@ async def devices(
     next_cursor = None
     if len(rows) > limit and page_rows:
         last_device, _, _, last_sort_key = page_rows[-1]
-        next_cursor = encode_cursor(
-            "devices", {"name": str(last_sort_key), "id": last_device.id}
-        )
+        next_cursor = encode_cursor("devices", {"name": str(last_sort_key), "id": last_device.id})
     return {
         "items": [device_dict(d, m, item_owner) for d, m, item_owner, _ in page_rows],
         "next_cursor": next_cursor,
@@ -529,6 +564,8 @@ async def users(_: Authed, db: Db) -> dict[str, Any]:
                 "login_name": u.login_name,
                 "role": u.role,
                 "status": u.status,
+                "active": u.active,
+                "stale": not u.active,
                 "device_count": counts.get(u.id, 0),
                 "source": u.source,
             }
@@ -598,32 +635,171 @@ async def tags(_: Authed, db: Db) -> dict[str, Any]:
 
 
 @router.get("/services")
-async def services(_: Authed, db: Db) -> dict[str, Any]:
-    # Service objects are retained in policy snapshots until the official service
-    # inventory adapter has synchronized a dedicated response for this tailnet.
+async def services(
+    _: Authed,
+    db: Db,
+    search: str = "",
+    status_filter: str = Query("", alias="status"),
+    host: str = "",
+    cursor: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    query = select(TailnetService).where(TailnetService.present.is_(True))
+    if search:
+        query = query.where(
+            or_(TailnetService.name.ilike(f"%{search}%"), TailnetService.id.ilike(f"%{search}%"))
+        )
+    if status_filter:
+        query = query.where(TailnetService.status == status_filter)
+    if host:
+        host_pattern = f"%{host}%"
+        matching_hosts = (
+            select(ServiceHost.service_id)
+            .outerjoin(Device, ServiceHost.device_id == Device.id)
+            .where(
+                or_(
+                    ServiceHost.device_id == host,
+                    Device.name.ilike(host_pattern),
+                    Device.hostname.ilike(host_pattern),
+                )
+            )
+        )
+        query = query.where(TailnetService.id.in_(matching_hosts))
+    decoded = decode_cursor(cursor, "services")
+    if decoded:
+        name, service_id = str(decoded.get("name", "")), str(decoded.get("id", ""))
+        query = query.where(
+            or_(
+                func.lower(TailnetService.name) > name,
+                and_(func.lower(TailnetService.name) == name, TailnetService.id > service_id),
+            )
+        )
+    rows = (
+        await db.scalars(
+            query.order_by(func.lower(TailnetService.name), TailnetService.id).limit(limit + 1)
+        )
+    ).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    host_count_rows = (
+        await db.execute(
+            select(ServiceHost.service_id, func.count()).group_by(ServiceHost.service_id)
+        )
+    ).all()
+    host_counts: dict[str, int] = {row[0]: row[1] for row in host_count_rows}
+    service_capability = await db.get(Capability, "services")
+    snapshot_stale = bool(service_capability and service_capability.status != "available")
     snapshot = await db.scalar(
         select(PolicySnapshot)
         .where(PolicySnapshot.valid.is_(True))
         .order_by(PolicySnapshot.retrieved_at.desc())
         .limit(1)
     )
-    services: set[str] = set()
+    policy_names: set[str] = set()
     if snapshot:
         for rule in snapshot.normalized.get("grants", []):
-            services.update(
+            policy_names.update(
                 str(value) for value in rule.get("dst", []) if str(value).startswith("svc:")
             )
-    return {
-        "items": [
+    real_names = {row.id for row in rows} | {row.name for row in rows}
+    items = [
+        {
+            "id": row.id,
+            "name": row.name,
+            "comment": row.comment,
+            "status": row.status,
+            "addresses": row.addresses,
+            "tags": row.tags,
+            "ports": row.ports,
+            "host_count": host_counts.get(row.id, 0),
+            "source": row.source,
+            "synced_at": row.synced_at,
+            "stale": snapshot_stale,
+        }
+        for row in rows
+    ]
+    if not cursor and not search and not status_filter and not host:
+        items.extend(
             {
+                "id": name,
                 "name": name,
                 "status": "policy_reference_only",
+                "addresses": [],
+                "tags": [],
+                "ports": [],
+                "host_count": 0,
                 "source": "tailnet_policy",
-                "detail": "Host inventory is not yet synchronized or unavailable",
+                "stale": True,
             }
-            for name in sorted(services)
+            for name in sorted(policy_names - real_names)
+        )
+    next_cursor = (
+        encode_cursor("services", {"name": rows[-1].name.casefold(), "id": rows[-1].id})
+        if has_more and rows
+        else None
+    )
+    return {"items": items, "next_cursor": next_cursor}
+
+
+@router.get("/services/{service_id}")
+async def service_detail(service_id: str, _: Authed, db: Db) -> dict[str, Any]:
+    service = await db.get(TailnetService, service_id)
+    capability = await db.get(Capability, "services")
+    if service is None:
+        raise HTTPException(404, "Service not found")
+    hosts = (
+        await db.scalars(select(ServiceHost).where(ServiceHost.service_id == service_id))
+    ).all()
+    endpoints = (
+        await db.scalars(select(ServiceEndpoint).where(ServiceEndpoint.service_id == service_id))
+    ).all()
+    device_names = await device_label_map(db)
+    snapshot = await db.scalar(
+        select(PolicySnapshot)
+        .where(PolicySnapshot.valid.is_(True))
+        .order_by(PolicySnapshot.retrieved_at.desc())
+        .limit(1)
+    )
+    references = []
+    if snapshot:
+        for index, rule in enumerate(snapshot.normalized.get("grants", [])):
+            if service.id in rule.get("dst", []) or service.name in rule.get("dst", []):
+                references.append({"section": "grants", "rule_index": index})
+    return {
+        "id": service.id,
+        "name": service.name,
+        "comment": service.comment,
+        "status": service.status,
+        "addresses": service.addresses,
+        "tags": service.tags,
+        "ports": service.ports,
+        "source": service.source,
+        "synced_at": service.synced_at,
+        "stale": not service.present or bool(capability and capability.status != "available"),
+        "availability": capability.status if capability else "unknown",
+        "hosts": [
+            {
+                "id": h.id,
+                "device_id": h.device_id,
+                "device_name": device_names.get(h.device_id or "", h.device_id),
+                "advertised": h.advertised,
+                "approved": h.approved,
+                "status": h.status,
+            }
+            for h in hosts
         ],
-        "next_cursor": None,
+        "endpoints": [
+            {
+                "id": e.id,
+                "host_id": e.host_id,
+                "protocol": e.protocol,
+                "port": e.port,
+                "type": e.endpoint_type,
+            }
+            for e in endpoints
+        ],
+        "policy_references": references,
+        "provenance": "tailscale_services_api",
     }
 
 
@@ -650,24 +826,35 @@ def _flow_filters(
     )
 
 
-def _flow_dict(flow: Flow, labels: dict[str, str]) -> dict[str, Any]:
-    source_identity = flow_identity(
-        flow.source_device_id, flow.source, labels, "Unresolved source"
-    )
+def _flow_dict(
+    flow: Flow,
+    labels: dict[str, str],
+    service_addresses: dict[str, tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    service_addresses = service_addresses or {}
+    source_identity = flow_identity(flow.source_device_id, flow.source, labels, "Unresolved source")
     destination_identity = flow_identity(
         flow.destination_device_id, flow.destination, labels, "Destination not logged"
     )
     reporter_identity = flow_identity(
         flow.reporting_node_id, flow.reporting_node_id, labels, "Reporter not reported"
     )
+    source_service = service_addresses.get(flow.source) if not flow.source_device_id else None
+    destination_service = (
+        service_addresses.get(flow.destination) if not flow.destination_device_id else None
+    )
     return {
         "id": flow.id,
-        "source": source_identity["label"],
+        "source": source_service[1] if source_service else source_identity["label"],
         "source_device_id": source_identity["id"],
         "source_raw": source_identity["raw"],
-        "destination": destination_identity["label"],
+        "source_service_id": source_service[0] if source_service else None,
+        "destination": destination_service[1]
+        if destination_service
+        else destination_identity["label"],
         "destination_device_id": destination_identity["id"],
         "destination_raw": destination_identity["raw"],
+        "destination_service_id": destination_service[0] if destination_service else None,
         "protocol": flow.protocol,
         "source_port": flow.source_port,
         "destination_port": flow.destination_port,
@@ -717,12 +904,13 @@ async def flows(
     )
     page_rows = rows[:limit]
     labels = await device_label_map(db)
+    service_addresses = await service_address_map(db)
     next_cursor = None
     if len(rows) > limit and page_rows:
         last = page_rows[-1]
         next_cursor = encode_cursor("flows", {"start": last.start.isoformat(), "id": last.id})
     return {
-        "items": [_flow_dict(flow, labels) for flow in page_rows],
+        "items": [_flow_dict(flow, labels, service_addresses) for flow in page_rows],
         "next_cursor": next_cursor,
         "notice": (
             "Historical client-reported windows, not active sessions. Peer reports can overlap."
@@ -768,8 +956,10 @@ def _csv_line(values: list[Any]) -> str:
     return output.getvalue()
 
 
-def _export_flow(flow: Flow, labels: dict[str, str]) -> dict[str, Any]:
-    item = _flow_dict(flow, labels)
+def _export_flow(
+    flow: Flow, labels: dict[str, str], service_addresses: dict[str, tuple[str, str]]
+) -> dict[str, Any]:
+    item = _flow_dict(flow, labels, service_addresses)
     item["start"] = flow.start.isoformat()
     item["end"] = flow.end.isoformat()
     return item
@@ -805,14 +995,19 @@ async def export_flows(
         Flow.start.desc(), Flow.id.desc()
     )
     probe = (
-        await db.execute(
-            apply_flow_filters(select(Flow.id), filters, now)
-            .order_by(Flow.start.desc(), Flow.id.desc())
-            .limit(settings.export_row_limit + 1)
+        (
+            await db.execute(
+                apply_flow_filters(select(Flow.id), filters, now)
+                .order_by(Flow.start.desc(), Flow.id.desc())
+                .limit(settings.export_row_limit + 1)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     truncated = len(probe) > settings.export_row_limit
     labels = await device_label_map(db)
+    service_addresses = await service_address_map(db)
 
     async def json_rows() -> AsyncIterator[str]:
         yield "["
@@ -823,7 +1018,7 @@ async def export_flows(
         async for flow in stream:
             if not first:
                 yield ","
-            yield json.dumps(_export_flow(flow, labels), separators=(",", ":"))
+            yield json.dumps(_export_flow(flow, labels, service_addresses), separators=(",", ":"))
             first = False
         yield "]"
 
@@ -831,9 +1026,11 @@ async def export_flows(
         columns = [
             "source",
             "source_device_id",
+            "source_service_id",
             "source_raw",
             "destination",
             "destination_device_id",
+            "destination_service_id",
             "destination_raw",
             "category",
             "protocol",
@@ -852,7 +1049,7 @@ async def export_flows(
             base_query.limit(settings.export_row_limit).execution_options(yield_per=500)
         )
         async for flow in stream:
-            item = _export_flow(flow, labels)
+            item = _export_flow(flow, labels, service_addresses)
             yield _csv_line([item.get(column, "") for column in columns])
 
     headers = {
@@ -881,6 +1078,29 @@ async def topology(
     rows = (await db.execute(query)).all()
     nodes = [device_dict(d, m, owner) for d, m, owner in rows if not (m and m.hidden)]
     node_ids = {n["id"] for n in nodes}
+    service_rows = (
+        await db.scalars(select(TailnetService).where(TailnetService.present.is_(True)))
+    ).all()
+    service_nodes = [
+        {
+            "id": f"service:{service.id}",
+            "service_id": service.id,
+            "name": service.name,
+            "source_name": service.name,
+            "hostname": "",
+            "os": "service",
+            "online": None,
+            "addresses": service.addresses,
+            "tags": service.tags,
+            "roles": ["service"],
+            "primary_role": "service",
+            "kind": "service",
+            "status": service.status,
+            "source": service.source,
+        }
+        for service in service_rows
+    ]
+    nodes.extend(service_nodes)
     flow_rows = (
         await db.execute(
             select(
@@ -908,6 +1128,45 @@ async def topology(
         for s, d, b, first, last in flow_rows
         if s in node_ids and d in node_ids
     ]
+    service_host_rows = (await db.scalars(select(ServiceHost))).all()
+    edges.extend(
+        {
+            "id": f"hosting:{host.id}",
+            "source": host.device_id,
+            "target": f"service:{host.service_id}",
+            "kind": "hosting",
+            "status": host.status,
+            "provenance": "tailscale_services_api",
+        }
+        for host in service_host_rows
+        if host.device_id in node_ids
+    )
+    for service in service_rows:
+        if not service.addresses:
+            continue
+        observed = (
+            await db.execute(
+                select(Flow.source_device_id, func.sum(Flow.tx_bytes + Flow.rx_bytes))
+                .where(
+                    Flow.start >= datetime.now(UTC) - timedelta(hours=hours),
+                    Flow.source_device_id.is_not(None),
+                    Flow.destination.in_(service.addresses),
+                )
+                .group_by(Flow.source_device_id)
+            )
+        ).all()
+        edges.extend(
+            {
+                "id": f"service-flow:{source_id}:{service.id}",
+                "source": source_id,
+                "target": f"service:{service.id}",
+                "kind": "observed",
+                "reported_bytes": reported_bytes or 0,
+                "provenance": "exact_service_address_match",
+            }
+            for source_id, reported_bytes in observed
+            if source_id in node_ids
+        )
     snapshot = await db.scalar(
         select(PolicySnapshot)
         .where(PolicySnapshot.valid.is_(True))
@@ -938,6 +1197,49 @@ async def topology(
             for e in policy_edges
             if e["source"] in node_ids and e["destination"] in node_ids
         ]
+        device_by_selector: dict[str, set[str]] = {}
+        for node in nodes:
+            if node.get("kind") == "service":
+                continue
+            selectors = {
+                node["id"],
+                node.get("name", ""),
+                node.get("hostname", ""),
+                *node.get("addresses", []),
+                *node.get("tags", []),
+            }
+            for selector in selectors:
+                if selector:
+                    device_by_selector.setdefault(str(selector), set()).add(node["id"])
+        for rule_index, grant in enumerate(snapshot.normalized.get("grants", [])):
+            destinations = [str(value) for value in grant.get("dst", [])]
+            for destination in destinations:
+                matching_service = next(
+                    (
+                        service
+                        for service in service_rows
+                        if destination in {service.id, service.name}
+                    ),
+                    None,
+                )
+                if matching_service is None:
+                    continue
+                source_ids: set[str] = set()
+                for selector in grant.get("src", []):
+                    source_ids.update(device_by_selector.get(str(selector), set()))
+                edges.extend(
+                    {
+                        "id": f"service-policy:{rule_index}:{source_id}:{matching_service.id}",
+                        "source": source_id,
+                        "target": f"service:{matching_service.id}",
+                        "kind": "permitted",
+                        "ports": grant.get("ip", []),
+                        "status": "fully_evaluated",
+                        "rule_index": rule_index,
+                        "provenance": "tailnet_policy_exact_selector",
+                    }
+                    for source_id in source_ids
+                )
     return {
         "nodes": nodes,
         "edges": edges,
@@ -1073,6 +1375,11 @@ async def sync_jobs(_: Authed, db: Db) -> dict[str, Any]:
                 "started_at": j.started_at,
                 "finished_at": j.finished_at,
                 "processed": j.processed,
+                "attempted": j.attempted,
+                "succeeded": j.succeeded,
+                "failed": j.failed,
+                "partial_success": j.partial_success,
+                "details": j.details,
                 "error": j.error,
             }
             for j in rows
@@ -1090,15 +1397,70 @@ async def run_sync(
     """Run one read-only source synchronization under its distributed job lock."""
     if settings.demo_mode:
         raise HTTPException(409, "Real synchronization is disabled in demo mode")
-    if kind == "inventory":
-        await sync_inventory()
-    elif kind == "policy":
-        await sync_policy()
-    elif kind in {"flows", "audit"}:
+    synchronizers = {
+        "inventory": sync_inventory,
+        "users": sync_users,
+        "devices": sync_devices,
+        "routes": sync_routes,
+        "services": sync_services,
+        "dns": sync_dns,
+        "webhooks": sync_webhooks,
+        "policy": sync_policy,
+    }
+    if kind in {"flows", "audit"}:
         await sync_logs(kind)
-    else:
+        return {"status": "completed", "kind": kind}
+    synchronize = synchronizers.get(kind)
+    if synchronize is None:
         raise HTTPException(404, "Unknown synchronization source")
+    await synchronize()
     return {"status": "completed", "kind": kind}
+
+
+@router.get("/settings/dns")
+async def dns_settings(_: Admin, db: Db) -> dict[str, Any]:
+    row = await db.get(DnsConfiguration, "current")
+    capability = await db.get(Capability, "dns")
+    if row is None:
+        return {"available": False, "status": capability.status if capability else "unknown"}
+    return {
+        "available": True,
+        "status": capability.status if capability else "unknown",
+        "stale": bool(capability and capability.status != "available"),
+        "magic_dns": row.magic_dns,
+        "override_local_dns": row.override_local_dns,
+        "nameservers": row.nameservers,
+        "search_paths": row.search_paths,
+        "split_dns": row.split_dns,
+        "synced_at": row.synced_at,
+    }
+
+
+@router.get("/settings/webhooks")
+async def webhook_settings(_: Admin, db: Db) -> dict[str, Any]:
+    rows = (
+        await db.scalars(
+            select(WebhookEndpoint)
+            .where(WebhookEndpoint.present.is_(True))
+            .order_by(WebhookEndpoint.id)
+        )
+    ).all()
+    capability = await db.get(Capability, "webhooks")
+    return {
+        "available": capability.status == "available" if capability else False,
+        "status": capability.status if capability else "unknown",
+        "stale": bool(capability and capability.status != "available"),
+        "items": [
+            {
+                "id": row.id,
+                "url": row.url_display,
+                "subscriptions": row.subscriptions,
+                "enabled": row.enabled,
+                "synced_at": row.synced_at,
+            }
+            for row in rows
+        ],
+    }
 
 
 @router.post("/settings/credentials")

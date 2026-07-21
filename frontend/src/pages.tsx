@@ -62,6 +62,8 @@ import type {
   FlowSummary,
   ObservedPhysicalEndpoint,
   Page,
+  ServiceDetail,
+  ServiceSummary,
   TopologyData,
 } from "./types";
 
@@ -211,7 +213,10 @@ export function TrafficChart({
   const chartData = trafficChartData(data);
   return (
     <ResponsiveContainer width="100%" height={260}>
-      <AreaChart data={chartData}>
+      <AreaChart
+        data={chartData}
+        margin={{ top: 12, right: 18, bottom: 8, left: 8 }}
+      >
         <defs>
           <linearGradient id="traffic" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0" stopColor="#5be7c4" stopOpacity={0.35} />
@@ -222,10 +227,24 @@ export function TrafficChart({
         <XAxis
           dataKey="time"
           tick={{ fill: "var(--muted)", fontSize: 11 }}
-          interval={3}
+          tickFormatter={trafficTimeLabel}
+          tickMargin={10}
+          minTickGap={48}
+          interval="preserveStartEnd"
+          padding={{ left: 8, right: 8 }}
+          height={38}
         />
-        <YAxis tick={{ fill: "var(--muted)", fontSize: 11 }} unit=" MB" />
-        <Tooltip contentStyle={tooltipStyle} />
+        <YAxis
+          tick={{ fill: "var(--muted)", fontSize: 11 }}
+          tickFormatter={trafficVolumeLabel}
+          tickMargin={8}
+          width={66}
+        />
+        <Tooltip
+          contentStyle={tooltipStyle}
+          labelFormatter={(value) => trafficTimeLabel(String(value))}
+          formatter={(value) => [trafficVolumeLabel(Number(value)), "Reported volume"]}
+        />
         <Area
           type="monotone"
           dataKey="reported"
@@ -242,14 +261,31 @@ export function trafficChartData(
   data: Array<{ bucket_start: string; reported_bytes: number }>,
 ) {
   return data.map((point) => ({
-    time: new Date(point.bucket_start).toLocaleString([], {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
+    time: point.bucket_start,
     reported: point.reported_bytes / 1e6,
   }));
+}
+
+export function trafficTimeLabel(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+    .format(date)
+    .replace(",", " ·");
+}
+
+export function trafficVolumeLabel(value: number) {
+  if (value >= 1000) {
+    const gigabytes = value / 1000;
+    return `${gigabytes >= 10 ? gigabytes.toFixed(0) : gigabytes.toFixed(1)} GB`;
+  }
+  if (value > 0 && value < 1) return `${value.toFixed(1)} MB`;
+  return `${Math.round(value)} MB`;
 }
 
 export function Devices({ role = "" }: { role?: string }) {
@@ -485,7 +521,7 @@ export function DeviceTable({
                   </button>
                 </td>
                 {columns.status !== false && <td>
-                  <Status online={d.online} />
+                  {d.stale ? <Badge tone="warning">Last-good / inactive</Badge> : <Status online={d.online} />}
                 </td>}
                 {columns.role !== false && <td>
                   <Badge>{d.primary_role.replaceAll("_", " ")}</Badge>
@@ -528,7 +564,7 @@ export function DeviceTable({
 
 export function Topology() {
   const { hours } = useTimeRange();
-  const [selected, setSelected] = useState<Device | null>(null);
+  const [selected, setSelected] = useState<Device | ServiceSummary | null>(null);
   const [showPolicy, setShowPolicy] = useState(false);
   const [showObserved, setShowObserved] = useState(false);
   const [layout, setLayout] = useState("cose");
@@ -568,7 +604,8 @@ export function Topology() {
           (e) =>
             ids.has(e.source) &&
             ids.has(e.target) &&
-            ((e.kind === "observed" && showObserved) ||
+            (e.kind === "hosting" ||
+              (e.kind === "observed" && showObserved) ||
               (e.kind === "permitted" && showPolicy)),
         )
         .map((e) => ({ data: { ...e, id: e.id } })),
@@ -632,6 +669,16 @@ export function Topology() {
           },
         },
         {
+          selector: 'edge[kind = "hosting"]',
+          style: {
+            "line-color": "#f8ba62",
+            "target-arrow-color": "#f8ba62",
+            "target-arrow-shape": "triangle",
+            "curve-style": "bezier",
+            width: 2,
+          },
+        },
+        {
           selector: ":selected",
           style: {
             "overlay-color": "#5be7c4",
@@ -642,7 +689,7 @@ export function Topology() {
       ],
       layout: { name: layout, animate: true, padding: 40 } as any,
     });
-    cy.on("tap", "node", (e) => setSelected(e.target.data("device") as Device));
+    cy.on("tap", "node", (e) => setSelected(e.target.data("device") as Device | ServiceSummary));
     cyRef.current = cy;
     return () => cy.destroy();
   }, [query.data, showPolicy, showObserved, layout, search]);
@@ -721,7 +768,11 @@ export function Topology() {
           <small>{query.data?.notice}</small>
         </div>
         {selected && (
-          <NodeDrawer device={selected} close={() => setSelected(null)} />
+          "kind" in selected && selected.kind === "service" ? (
+            <ServiceDrawer service={selected} close={() => setSelected(null)} />
+          ) : (
+            <NodeDrawer device={selected as Device} close={() => setSelected(null)} />
+          )
         )}
       </div>
     </div>
@@ -787,6 +838,7 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
           <Loading />
         ) : tab === "overview" ? (
           <>
+            {d.stale && <div className="notice-bar warning"><AlertTriangle /><span>This device was absent from the last complete upstream listing. Showing its last successful snapshot.</span></div>}
             <DetailGroup title="Identity">
               <Detail label="Full name" value={d.source_name} />
               <Detail label="Owner" value={<OwnerLink device={d} />} />
@@ -1364,6 +1416,7 @@ export function Flows() {
                       <FlowEndpoint
                         label={f.source}
                         deviceId={f.source_device_id}
+                        serviceId={f.source_service_id}
                         raw={f.source_raw}
                       />
                     </td>
@@ -1371,6 +1424,7 @@ export function Flows() {
                       <FlowEndpoint
                         label={f.destination}
                         deviceId={f.destination_device_id}
+                        serviceId={f.destination_service_id}
                         raw={f.destination_raw}
                       />
                     </td>
@@ -1757,6 +1811,71 @@ function PolicyDuplicateReview({ query }: { query: any }) {
   );
 }
 
+export function Services() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [search, setSearch] = useState(searchParams.get("search") ?? "");
+  const [statusFilter, setStatusFilter] = useState(searchParams.get("status") ?? "");
+  const [host, setHost] = useState(searchParams.get("host") ?? "");
+  const [selected, setSelected] = useState<ServiceSummary | null>(null);
+  const query = useInfiniteQuery({
+    queryKey: ["services", search, statusFilter, host],
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams({ search });
+      if (statusFilter) params.set("status", statusFilter);
+      if (host) params.set("host", host);
+      if (pageParam) params.set("cursor", pageParam);
+      return request<Page<ServiceSummary>>(`/services?${params}`);
+    },
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+  });
+  const rows = query.data?.pages.flatMap((page) => page.items) ?? [];
+  const updateFilter = (key: string, value: string) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (value) next.set(key, value);
+      else next.delete(key);
+      return next;
+    });
+  };
+  return (
+    <div className="page">
+      <PageHead eyebrow="TAILSCALE SERVICES" title="Services" description="Read-only Service inventory, hosting devices, endpoints, and policy references." />
+      <div className="toolbar inventory-toolbar">
+        <label className="search-field"><Search /><input value={search} placeholder="Search Services…" onChange={(event) => { setSearch(event.target.value); updateFilter("search", event.target.value); }} /></label>
+        <select aria-label="Service status filter" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); updateFilter("status", event.target.value); }}>
+          <option value="">All statuses</option>
+          {['connected', 'offline', 'pending_approval', 'draining', 'pre-approved', 'needs_configuration', 'unknown'].map((value) => <option value={value} key={value}>{value.replaceAll("_", " ")}</option>)}
+        </select>
+        <input aria-label="Service host filter" value={host} placeholder="Filter hosting device…" onChange={(event) => { setHost(event.target.value); updateFilter("host", event.target.value); }} />
+      </div>
+      {query.isLoading ? <Loading /> : query.error ? <ErrorState error={query.error} /> : !rows.length ? <Empty title="No Services available" detail="Synchronize the Services source or confirm that this tailnet uses Tailscale Services." /> : <>
+        <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Service</th><th>Status</th><th>Addresses</th><th>Ports</th><th>Hosts</th><th>Provenance</th></tr></thead><tbody>
+          {rows.map((service) => <tr key={service.id} className="clickable-row" onClick={() => setSelected(service)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") setSelected(service); }}><td><strong>{service.name}</strong>{service.comment && <small className="block">{service.comment}</small>}</td><td><Badge tone={service.status === "connected" ? "success" : service.status === "offline" ? "danger" : "warning"}>{service.status.replaceAll("_", " ")}</Badge>{service.stale && <small className="block">Last-good / stale</small>}</td><td>{service.addresses?.join(", ") || "Not reported"}</td><td>{service.ports?.join(", ") || "Not reported"}</td><td>{service.host_count ?? 0}</td><td>{service.source}</td></tr>)}
+        </tbody></table></div></Card>
+        {query.hasNextPage && <Button variant="secondary" onClick={() => void query.fetchNextPage()} disabled={query.isFetchingNextPage}>{query.isFetchingNextPage ? "Loading…" : "Load more Services"}</Button>}
+      </>}
+      {selected && <ServiceDrawer service={selected} close={() => setSelected(null)} />}
+    </div>
+  );
+}
+
+function ServiceDrawer({ service, close }: { service: ServiceSummary; close: () => void }) {
+  const serviceId = service.service_id ?? service.id.replace(/^service:/, "");
+  const detail = useQuery({ queryKey: ["service", serviceId], queryFn: () => request<ServiceDetail>(`/services/${encodeURIComponent(serviceId)}`), enabled: service.status !== "policy_reference_only" });
+  const value = detail.data;
+  return <><div className="drawer-backdrop" aria-hidden="true" onClick={close} /><aside className="drawer" role="dialog" aria-modal="true" aria-label={`Service details for ${service.name}`}>
+    <div className="drawer-head"><div className="large-node-icon"><GitCompareArrows /></div><div><span className="eyebrow">TAILSCALE SERVICE</span><h2>{service.name}</h2><Badge tone={(value?.status ?? service.status) === "connected" ? "success" : "warning"}>{value?.status ?? service.status}</Badge></div><button className="icon-button" onClick={close} aria-label="Close Service details"><X /></button></div>
+    <div className="drawer-body">{detail.isLoading ? <Loading /> : detail.error ? <ErrorState error={detail.error} /> : service.status === "policy_reference_only" ? <Empty title="Policy reference only" detail="No matching Service inventory object has been synchronized." /> : value && <>
+      {value.stale && <div className="notice-bar warning"><AlertTriangle /><span>This is the last successful snapshot; the current source is unavailable.</span></div>}
+      <DetailGroup title="Service"><Detail label="Name" value={value.name} /><Detail label="Status" value={value.status} /><Detail label="Addresses" value={value.addresses.join(", ") || "Not reported"} /><Detail label="Tags" value={value.tags.join(", ") || "None"} /><Detail label="Ports" value={value.ports.join(", ") || "Not reported"} /><Detail label="Last synchronized" value={relativeTime(value.synced_at ?? null)} /></DetailGroup>
+      <DetailGroup title="Hosting devices">{value.hosts.length ? value.hosts.map((host) => <Detail key={host.id} label={host.device_name ?? host.device_id ?? "Unknown host"} value={<span>{host.status} · advertised {String(host.advertised ?? "not reported")} · approved {String(host.approved ?? "not reported")}</span>} />) : <p>No hosts were reported.</p>}</DetailGroup>
+      <DetailGroup title="Endpoints">{value.endpoints.length ? value.endpoints.map((endpoint) => <Detail key={endpoint.id} label={endpoint.type} value={`${endpoint.protocol}:${endpoint.port ?? "not reported"}`} />) : <p>No endpoints were reported.</p>}</DetailGroup>
+      <DetailGroup title="Policy references"><Detail label="References" value={value.policy_references.length ? value.policy_references.map((reference) => `${reference.section}[${reference.rule_index}]`).join(", ") : "None in current normalized policy"} /><Detail label="Provenance" value={value.provenance} /></DetailGroup>
+    </>}</div>
+  </aside></>;
+}
+
 export function InventoryPage({ kind }: { kind: string }) {
   const [searchParams] = useSearchParams();
   const endpoint =
@@ -1814,7 +1933,7 @@ function GenericTable({
   focusId: string | null;
 }) {
   const hasHumanIdentity = Boolean(rows[0]?.display_name || rows[0]?.name || rows[0]?.device);
-  const columns = Object.keys(rows[0] ?? {})
+  const columns = kind === "sync" ? ["kind", "status", "started_at", "finished_at", "attempted", "succeeded", "failed", "details", "error"] : Object.keys(rows[0] ?? {})
     .filter((k) => !["old", "new", "raw"].includes(k))
     .filter((k) => !(hasHumanIdentity && ["id", "device_id"].includes(k)))
     .sort((left, right) => {
@@ -1867,6 +1986,16 @@ export function SettingsPage({ user }: { user: { role: string } }) {
   const query = useQuery({
     queryKey: ["capabilities"],
     queryFn: () => request<Page<any>>("/capabilities"),
+  });
+  const dns = useQuery({
+    queryKey: ["settings-dns"],
+    queryFn: () => request<any>("/settings/dns"),
+    enabled: user.role === "administrator",
+  });
+  const webhooks = useQuery({
+    queryKey: ["settings-webhooks"],
+    queryFn: () => request<any>("/settings/webhooks"),
+    enabled: user.role === "administrator",
   });
   return (
     <div className="page">
@@ -1963,6 +2092,22 @@ export function SettingsPage({ user }: { user: { role: string } }) {
             </div>
           )}
         </Card>
+        {user.role === "administrator" && <>
+          <Card className="settings-card">
+            <CardHead title="DNS configuration" detail="Current read-only snapshot from the DNS API." />
+            {dns.isLoading ? <Loading /> : dns.error ? <ErrorState error={dns.error} /> : !dns.data?.available ? <Empty title="DNS unavailable" detail={`Capability status: ${dns.data?.status ?? "unknown"}`} /> : <>
+              {dns.data.stale && <Badge tone="warning">Last-good snapshot</Badge>}
+              <Detail label="MagicDNS" value={String(dns.data.magic_dns ?? "not reported")} />
+              <Detail label="Override local DNS" value={String(dns.data.override_local_dns ?? "not reported")} />
+              <Detail label="Nameservers" value={dns.data.nameservers?.join(", ") || "None reported"} />
+              <Detail label="Search paths" value={dns.data.search_paths?.join(", ") || "None reported"} />
+            </>}
+          </Card>
+          <Card className="settings-card">
+            <CardHead title="Webhook inventory" detail="Credentials and query values are removed before storage and display." />
+            {webhooks.isLoading ? <Loading /> : webhooks.error ? <ErrorState error={webhooks.error} /> : !webhooks.data?.items?.length ? <Empty title="No webhooks available" detail={`Capability status: ${webhooks.data?.status ?? "unknown"}`} /> : webhooks.data.items.map((webhook: any) => <div className="setting-row" key={webhook.id}><div><strong>{webhook.url}</strong><p>{webhook.subscriptions.join(", ") || "No subscriptions reported"}</p></div><Badge tone={webhook.enabled === false ? "warning" : "success"}>{webhook.enabled === false ? "disabled" : webhook.enabled === true ? "enabled" : "not reported"}</Badge></div>)}
+          </Card>
+        </>}
       </div>
     </div>
   );
@@ -2069,16 +2214,18 @@ function EntityLink({
 function FlowEndpoint({
   label,
   deviceId,
+  serviceId,
   raw,
 }: {
   label: string;
   deviceId?: string | null;
+  serviceId?: string | null;
   raw?: string | null;
 }) {
   return (
     <span className="flow-entity">
       <strong>
-        <EntityLink label={label} deviceId={deviceId} />
+        {serviceId ? <Link to={`/services?search=${encodeURIComponent(serviceId)}`}>{label}</Link> : <EntityLink label={label} deviceId={deviceId} />}
       </strong>
       {raw && raw !== label && <code>{raw}</code>}
     </span>

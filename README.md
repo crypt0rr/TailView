@@ -32,14 +32,13 @@ To preview the complete UI without a tailnet, set `DEMO_MODE=true` before first 
 
 ## Tailscale credentials
 
-OAuth client credentials are preferred. Grant only the read scopes needed for enabled capabilities:
+OAuth client credentials are preferred. For complete inventory including Services, use the documented universal read-only scope:
 
 ```text
-devices:core:read users:read devices:routes:read
-devices:posture_attributes:read policy_file:read
-logs:network:read logs:configuration:read
-dns:read webhooks:read services:read
+all:read
 ```
+
+If Services synchronization is disabled, TailView can instead use the documented granular read scopes: `devices:core:read`, `users:read`, `devices:routes:read`, `devices:posture_attributes:read`, `policy_file:read`, `logs:network:read`, `logs:configuration:read`, `dns:read`, and `webhooks:read`. Tailscale does not currently document a granular Services scope.
 
 Scope names and endpoints are checked against the current official API before each release; see [API capabilities](docs/API_CAPABILITIES.md). A full API access token is supported as a fallback but carries broader permissions and expires within the period selected in Tailscale.
 

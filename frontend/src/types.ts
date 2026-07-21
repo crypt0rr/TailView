@@ -10,6 +10,8 @@ export interface Device {
   owner_login_name: string | null;
   online: boolean | null;
   authorized: boolean | null;
+  active?: boolean;
+  stale?: boolean;
   last_seen: string | null;
   created: string | null;
   key_expiry: string | null;
@@ -77,16 +79,41 @@ export interface GraphEdge {
   id: string;
   source: string;
   target: string;
-  kind: "observed" | "permitted";
+  kind: "observed" | "permitted" | "hosting";
   reported_bytes?: number;
   ports?: string[];
   status?: string;
   rule_index?: number;
 }
 export interface TopologyData {
-  nodes: Device[];
+  nodes: Array<Device | ServiceSummary>;
   edges: GraphEdge[];
   notice: string;
+}
+export interface ServiceSummary {
+  id: string;
+  service_id?: string;
+  name: string;
+  comment?: string;
+  status: string;
+  addresses: string[];
+  tags: string[];
+  ports: string[];
+  host_count?: number;
+  source: string;
+  synced_at?: string;
+  stale?: boolean;
+  kind?: "service";
+  primary_role?: "service";
+  online?: null;
+}
+
+export interface ServiceDetail extends ServiceSummary {
+  availability: string;
+  hosts: Array<{ id: string; device_id: string | null; device_name: string | null; advertised: boolean | null; approved: boolean | null; status: string }>;
+  endpoints: Array<{ id: string; host_id: string | null; protocol: string; port: number | null; type: string }>;
+  policy_references: Array<{ section: string; rule_index: number }>;
+  provenance: string;
 }
 export interface Page<T> {
   items: T[];
@@ -98,9 +125,11 @@ export interface FlowRecord {
   id: number;
   source: string;
   source_device_id: string | null;
+  source_service_id: string | null;
   source_raw: string | null;
   destination: string;
   destination_device_id: string | null;
+  destination_service_id: string | null;
   destination_raw: string | null;
   protocol: number | null;
   source_port: number | null;

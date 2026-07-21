@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from .config import Settings, get_settings
@@ -18,11 +21,16 @@ from .models import (
     Capability,
     Credential,
     Device,
+    DnsConfiguration,
     Flow,
     PolicySnapshot,
     RawPayload,
+    ServiceEndpoint,
+    ServiceHost,
     SyncJob,
+    TailnetService,
     TailnetUser,
+    WebhookEndpoint,
 )
 from .policy import parse_policy
 from .security import SecretBox
@@ -139,131 +147,476 @@ def build_user_login_index(users: Iterable[tuple[str, str]]) -> dict[str, str]:
 
 
 async def sync_inventory() -> None:
+    """Run every inventory source without sharing a transaction or failure boundary."""
+    for synchronize in (
+        sync_users,
+        sync_devices,
+        sync_routes,
+        sync_services,
+        sync_dns,
+        sync_webhooks,
+    ):
+        try:
+            await synchronize()
+        except Exception:
+            log.exception("inventory_source_orchestration_failed", source=synchronize.__name__)
+
+
+SourceResult = tuple[int, int, int, dict[str, Any]]
+
+
+class SourceAllFailed(TailscaleError):
+    def __init__(self, status: int, attempted: int, details: dict[str, Any]) -> None:
+        super().__init__(status, "Every item request failed")
+        self.attempted = attempted
+        self.details = details
+
+
+async def _run_source(
+    *,
+    kind: str,
+    lock_key: int,
+    capability_name: str,
+    capability_source: str,
+    requirement: str,
+    worker: Any,
+) -> None:
     settings = get_settings()
     async with SessionLocal() as session:
-        lock = await lock_job(81001)
+        lock = await lock_job(lock_key)
         if lock is None:
             return
-        job = SyncJob(kind="inventory", status="running")
+        job = SyncJob(kind=kind, status="running")
         session.add(job)
         await session.commit()
         job_id = job.id
         client = await client_for(session, settings)
-        if not client:
+        if client is None:
             job.status = "skipped"
             job.error = "No Tailscale credentials configured"
             job.finished_at = datetime.now(UTC)
             await session.commit()
-            await unlock_job(lock, 81001)
+            await unlock_job(lock, lock_key)
             return
-        processed = 0
         try:
-            users = await client.users()
-            await record_payload(session, "users", users)
-            user_logins: list[tuple[str, str]] = []
-            for item in users:
-                upstream_id = str(item.get("id", item.get("userId", item.get("loginName", ""))))
-                if not upstream_id:
-                    continue
-                user = await session.get(TailnetUser, upstream_id) or TailnetUser(id=upstream_id)
-                user.display_name = str(item.get("displayName", item.get("name", "")))
-                user.login_name = str(item.get("loginName", item.get("email", "")))
-                user.role = str(item.get("role", "member"))
-                user.status = str(item.get("status", "unknown"))
-                user.raw = redact(item)
-                user.synced_at = datetime.now(UTC)
-                session.add(user)
-                user_logins.append((upstream_id, user.login_name))
-            owner_ids = build_user_login_index(user_logins)
-            devices = await client.devices()
-            await record_payload(session, "devices", devices)
-            for item in devices:
-                upstream_id = preferred_device_id(item)
-                if not upstream_id:
-                    continue
-                route_body: dict[str, Any] = {}
-                try:
-                    route_body = await client.routes(upstream_id)
-                except TailscaleError:
-                    pass
-                advertised = list(
-                    route_body.get("advertisedRoutes", item.get("advertisedRoutes", [])) or []
-                )
-                approved = list(
-                    route_body.get(
-                        "enabledRoutes",
-                        route_body.get("approvedRoutes", item.get("enabledRoutes", [])),
-                    )
-                    or []
-                )
-                roles, primary = classify(item, advertised)
-                device = await session.get(Device, upstream_id) or Device(
-                    id=upstream_id, name=str(item.get("name", upstream_id))
-                )
-                device.name = str(item.get("name", upstream_id))
-                device.hostname = str(item.get("hostname", device.name.split(".")[0]))
-                device.os = str(item.get("os", "unknown"))
-                device.version = str(item.get("clientVersion", ""))
-                owner_login = str(item.get("user", "")).casefold()
-                device.owner_id = owner_ids.get(owner_login)
-                device.online = item.get("connectedToControl", item.get("online"))
-                device.authorized = item.get("authorized")
-                device.last_seen = parse_time(item.get("lastSeen"))
-                device.created = parse_time(item.get("created"))
-                device.key_expiry = parse_time(item.get("expires"))
-                device.addresses = list(item.get("addresses", []))
-                device.tags = list(item.get("tags", []))
-                device.advertised_routes = advertised
-                device.approved_routes = approved
-                device.roles = roles
-                device.primary_role = primary
-                device.raw = redact(item)
-                device.synced_at = datetime.now(UTC)
-                session.add(device)
-                processed += 1
-            await session.commit()
-            job.status = "success"
-            job.processed = processed
-            capability = await session.get(Capability, "device_inventory") or Capability(
-                name="device_inventory", source="Tailscale device API"
+            attempted, succeeded, failed, details = await worker(session, client)
+            job.attempted = attempted
+            job.succeeded = succeeded
+            job.failed = failed
+            job.processed = succeeded
+            job.details = details
+            job.status = "partial_success" if failed and succeeded else "success"
+            job.partial_success = bool(failed and succeeded)
+            capability = await session.get(Capability, capability_name) or Capability(
+                name=capability_name, source=capability_source
             )
             capability.status = "available"
-            capability.requirement = "devices:core:read"
+            capability.requirement = requirement
+            capability.detail = (
+                "Some items failed; last-good values were retained." if failed else ""
+            )
             capability.last_success = datetime.now(UTC)
             capability.checked_at = datetime.now(UTC)
             session.add(capability)
+            await session.commit()
         except TailscaleError as exc:
+            await session.rollback()
+            job = await session.get(SyncJob, job_id) or SyncJob(id=job_id, kind=kind)
             job.status = "failed"
+            job.partial_success = False
+            if isinstance(exc, SourceAllFailed):
+                job.attempted = exc.attempted
+                job.failed = exc.attempted
+                job.details = exc.details
+            else:
+                job.failed = max(job.attempted, 1)
             job.error = f"Upstream returned HTTP {exc.status}"
-            capability = await session.get(Capability, "device_inventory") or Capability(
-                name="device_inventory", source="Tailscale device API"
+            capability = await session.get(Capability, capability_name) or Capability(
+                name=capability_name, source=capability_source
             )
             capability.status = capability_status(exc)
-            capability.detail = f"Upstream returned HTTP {exc.status}"
+            capability.requirement = requirement
+            capability.detail = job.error
             capability.checked_at = datetime.now(UTC)
-            session.add(capability)
+            session.add_all([job, capability])
         except Exception as exc:
             await session.rollback()
-            persisted_job = await session.get(SyncJob, job_id)
-            if persisted_job is None:
-                persisted_job = SyncJob(id=job_id, kind="inventory", status="failed")
-                session.add(persisted_job)
-            job = persisted_job
+            job = await session.get(SyncJob, job_id) or SyncJob(id=job_id, kind=kind)
             job.status = "failed"
-            job.error = f"Inventory ingestion failed ({type(exc).__name__})"
-            capability = await session.get(Capability, "device_inventory") or Capability(
-                name="device_inventory", source="Tailscale device API"
+            job.partial_success = False
+            job.error = f"Ingestion failed ({type(exc).__name__})"
+            capability = await session.get(Capability, capability_name) or Capability(
+                name=capability_name, source=capability_source
             )
             capability.status = "upstream_error"
-            capability.detail = f"Inventory ingestion failed ({type(exc).__name__})"
+            capability.requirement = requirement
+            capability.detail = job.error
             capability.checked_at = datetime.now(UTC)
-            session.add(capability)
-            log.exception("inventory_ingestion_failed", error_type=type(exc).__name__)
+            session.add_all([job, capability])
+            log.exception("sync_ingestion_failed", kind=kind, error_type=type(exc).__name__)
         finally:
             job.finished_at = datetime.now(UTC)
             await session.commit()
             await client.close()
-            await unlock_job(lock, 81001)
+            await unlock_job(lock, lock_key)
+
+
+async def _users_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
+    items = await client.users()
+    await record_payload(session, "users", items)
+    await session.execute(update(TailnetUser).values(active=False))
+    succeeded = 0
+    for item in items:
+        upstream_id = str(item.get("id") or item.get("userId") or item.get("loginName") or "")
+        if not upstream_id:
+            continue
+        user = await session.get(TailnetUser, upstream_id) or TailnetUser(id=upstream_id)
+        user.display_name = str(item.get("displayName") or item.get("name") or "")
+        user.login_name = str(item.get("loginName") or item.get("email") or "")
+        user.role = str(item.get("role") or "member")
+        user.status = str(item.get("status") or "unknown")
+        user.active = True
+        user.raw = redact(item)
+        user.synced_at = datetime.now(UTC)
+        session.add(user)
+        succeeded += 1
+    return len(items), succeeded, 0, {"listed": len(items)}
+
+
+async def sync_users() -> None:
+    await _run_source(
+        kind="users",
+        lock_key=81101,
+        capability_name="user_inventory",
+        capability_source="Tailscale user API",
+        requirement="users:read",
+        worker=_users_worker,
+    )
+
+
+async def _devices_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
+    items = await client.devices()
+    await record_payload(session, "devices", items)
+    await session.execute(update(Device).values(active=False))
+    rows = (await session.execute(select(TailnetUser.id, TailnetUser.login_name))).all()
+    owner_ids = build_user_login_index((row[0], row[1]) for row in rows)
+    succeeded = 0
+    for item in items:
+        upstream_id = preferred_device_id(item)
+        if not upstream_id:
+            continue
+        device = await session.get(Device, upstream_id) or Device(id=upstream_id, name=upstream_id)
+        device.name = str(item.get("name") or upstream_id)
+        device.hostname = str(item.get("hostname") or device.name.split(".")[0])
+        device.os = str(item.get("os") or "unknown")
+        device.version = str(item.get("clientVersion") or "")
+        device.owner_id = owner_ids.get(str(item.get("user") or "").casefold())
+        device.online = item.get("connectedToControl", item.get("online"))
+        device.authorized = item.get("authorized")
+        device.active = True
+        device.last_seen = parse_time(item.get("lastSeen"))
+        device.created = parse_time(item.get("created"))
+        device.key_expiry = parse_time(item.get("expires"))
+        device.addresses = list(item.get("addresses") or [])
+        device.tags = list(item.get("tags") or [])
+        advertised = list(item.get("advertisedRoutes") or device.advertised_routes or [])
+        device.roles, device.primary_role = classify(item, advertised)
+        device.raw = redact(item)
+        device.synced_at = datetime.now(UTC)
+        session.add(device)
+        succeeded += 1
+    return len(items), succeeded, 0, {"listed": len(items)}
+
+
+async def sync_devices() -> None:
+    await _run_source(
+        kind="devices",
+        lock_key=81102,
+        capability_name="device_inventory",
+        capability_source="Tailscale device API",
+        requirement="devices:core:read",
+        worker=_devices_worker,
+    )
+
+
+async def _routes_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
+    devices = (await session.scalars(select(Device).where(Device.active.is_(True)))).all()
+    semaphore = asyncio.Semaphore(8)
+
+    async def fetch(device: Device) -> tuple[Device, dict[str, Any] | TailscaleError]:
+        async with semaphore:
+            try:
+                return device, await client.routes(device.id)
+            except TailscaleError as exc:
+                return device, exc
+
+    results = await asyncio.gather(*(fetch(device) for device in devices))
+    errors: Counter[str] = Counter()
+    succeeded = 0
+    for device, result in results:
+        if isinstance(result, TailscaleError):
+            errors[capability_status(result)] += 1
+            continue
+        advertised = list(result.get("advertisedRoutes") or [])
+        approved = list(result.get("enabledRoutes") or result.get("approvedRoutes") or [])
+        device.advertised_routes = advertised
+        device.approved_routes = approved
+        device.roles, device.primary_role = classify(device.raw, advertised)
+        device.synced_at = datetime.now(UTC)
+        succeeded += 1
+    failed = len(devices) - succeeded
+    if devices and succeeded == 0:
+        statuses = set(errors)
+        status = next(iter(statuses)) if len(statuses) == 1 else "upstream_error"
+        status_codes = {
+            "permission_denied": 403,
+            "unsupported": 404,
+            "feature_disabled": 409,
+        }
+        synthetic = SourceAllFailed(
+            status_codes.get(status, 500),
+            len(devices),
+            {"concurrency": 8, "failure_statuses": dict(errors)},
+        )
+        raise synthetic
+    return len(devices), succeeded, failed, {"concurrency": 8, "failure_statuses": dict(errors)}
+
+
+async def sync_routes() -> None:
+    await _run_source(
+        kind="routes",
+        lock_key=81103,
+        capability_name="routes",
+        capability_source="Tailscale device routes API",
+        requirement="devices:routes:read",
+        worker=_routes_worker,
+    )
+
+
+def _service_identity(item: dict[str, Any]) -> str:
+    return str(item.get("id") or item.get("name") or item.get("serviceName") or "")
+
+
+def _service_status(item: dict[str, Any]) -> str:
+    value = item.get("status", item.get("state"))
+    return str(value).casefold().replace(" ", "_") if value else "unknown"
+
+
+def _endpoint_values(service_id: str, host_id: str | None, values: Any) -> list[ServiceEndpoint]:
+    endpoints: list[ServiceEndpoint] = []
+    known_fields = {"protocol", "proto", "port", "type"}
+    if isinstance(values, dict) and not known_fields.intersection(values):
+        values = [
+            {
+                "protocol": str(key).partition(":")[0],
+                "port": str(key).partition(":")[2],
+                "type": "configured_mapping",
+                "target": target,
+            }
+            for key, target in values.items()
+        ]
+    elif isinstance(values, dict):
+        values = [values]
+    for value in values if isinstance(values, list) else []:
+        if isinstance(value, str):
+            protocol, _, port_text = value.partition(":")
+            raw = {"value": value, "protocol": protocol or "unknown", "port": port_text}
+        else:
+            raw = value if isinstance(value, dict) else {"value": value}
+        protocol = str(raw.get("protocol") or raw.get("proto") or "unknown")
+        port_value = raw.get("port")
+        port = int(str(port_value)) if str(port_value).isdigit() else None
+        digest = hashlib.sha256(
+            f"{service_id}:{host_id}:{json.dumps(raw, sort_keys=True)}".encode()
+        ).hexdigest()
+        endpoints.append(
+            ServiceEndpoint(
+                id=digest,
+                service_id=service_id,
+                host_id=host_id,
+                protocol=protocol,
+                port=port,
+                endpoint_type=str(raw.get("type") or "unknown"),
+                raw=redact(raw),
+            )
+        )
+    return endpoints
+
+
+async def _services_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
+    listed = await client.services()
+    await record_payload(session, "services", listed)
+    await session.execute(update(TailnetService).values(present=False))
+    succeeded = 0
+    failures: Counter[str] = Counter()
+    for summary in listed:
+        service_id = _service_identity(summary)
+        if not service_id:
+            failures["invalid_response"] += 1
+            continue
+        detail = summary
+        try:
+            detail = {**summary, **await client.service(service_id)}
+        except TailscaleError as exc:
+            failures[f"detail_{capability_status(exc)}"] += 1
+        service = await session.get(TailnetService, service_id) or TailnetService(
+            id=service_id, name=service_id
+        )
+        service.name = str(detail.get("name") or detail.get("serviceName") or service_id)
+        service.comment = str(detail.get("comment") or detail.get("description") or "")
+        service.addresses = list(detail.get("addrs") or detail.get("addresses") or [])
+        service.tags = list(detail.get("tags") or [])
+        service.ports = [str(value) for value in detail.get("ports", []) or []]
+        service.status = _service_status(detail)
+        service.present = True
+        service.raw = redact(detail)
+        service.synced_at = datetime.now(UTC)
+        session.add(service)
+        await session.flush()
+        try:
+            hosts = await client.service_hosts(service_id)
+            await session.execute(
+                delete(ServiceEndpoint).where(ServiceEndpoint.service_id == service_id)
+            )
+            await session.execute(delete(ServiceHost).where(ServiceHost.service_id == service_id))
+            for index, host in enumerate(hosts):
+                device_id = (
+                    str(host.get("nodeId") or host.get("deviceId") or host.get("id") or "") or None
+                )
+                host_id = f"{service_id}:{device_id or index}"
+                if device_id:
+                    try:
+                        approval = await client.service_host_approval(service_id, device_id)
+                        host = {**host, **approval}
+                    except TailscaleError as exc:
+                        failures[f"approval_{capability_status(exc)}"] += 1
+                row = ServiceHost(
+                    id=host_id,
+                    service_id=service_id,
+                    device_id=device_id,
+                    advertised=host.get("advertised"),
+                    approved=host.get("approved"),
+                    status=_service_status(host),
+                    raw=redact(host),
+                )
+                session.add(row)
+                for endpoint in _endpoint_values(service_id, host_id, host.get("endpoints", [])):
+                    session.add(endpoint)
+        except TailscaleError as exc:
+            failures[f"hosts_{capability_status(exc)}"] += 1
+        for endpoint in _endpoint_values(service_id, None, detail.get("endpoints", [])):
+            session.add(endpoint)
+        for endpoint in _endpoint_values(service_id, None, detail.get("ports", [])):
+            session.add(endpoint)
+        succeeded += 1
+    return (
+        len(listed),
+        succeeded,
+        sum(failures.values()),
+        {"listed": len(listed), "failure_statuses": dict(failures)},
+    )
+
+
+async def sync_services() -> None:
+    await _run_source(
+        kind="services",
+        lock_key=81104,
+        capability_name="services",
+        capability_source="Tailscale Services API",
+        requirement="all:read (no granular Services scope is documented)",
+        worker=_services_worker,
+    )
+
+
+async def _dns_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
+    item = await client.dns()
+    await record_payload(session, "dns", item)
+    preferences = item.get("preferences", {})
+    row = await session.get(DnsConfiguration, "current") or DnsConfiguration(id="current")
+    row.magic_dns = preferences.get("magicDNS", preferences.get("magicDns"))
+    row.override_local_dns = preferences.get("overrideLocalDNS")
+    nameservers = item.get("nameservers", {})
+    if isinstance(nameservers, dict):
+        nameserver_values = nameservers.get("dns", nameservers.get("nameservers", []))
+    else:
+        nameserver_values = nameservers if isinstance(nameservers, list) else []
+    row.nameservers = list(nameserver_values or [])
+    paths = item.get("searchPaths", {})
+    if isinstance(paths, dict):
+        path_values = paths.get("searchPaths", [])
+    else:
+        path_values = paths if isinstance(paths, list) else []
+    row.search_paths = list(path_values or [])
+    split = item.get("splitDNS", {})
+    row.split_dns = dict(split if isinstance(split, dict) else {})
+    row.raw = redact(item)
+    row.synced_at = datetime.now(UTC)
+    session.add(row)
+    return 1, 1, 0, {}
+
+
+async def sync_dns() -> None:
+    await _run_source(
+        kind="dns",
+        lock_key=81105,
+        capability_name="dns",
+        capability_source="Tailscale DNS API",
+        requirement="dns:read",
+        worker=_dns_worker,
+    )
+
+
+def redact_webhook_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+    except ValueError:
+        return "[invalid URL]"
+
+
+async def _webhooks_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
+    items = await client.webhooks()
+    await session.execute(update(WebhookEndpoint).values(present=False))
+    safe_items: list[dict[str, Any]] = []
+    succeeded = 0
+    for item in items:
+        endpoint_id = str(item.get("id") or item.get("endpointId") or "")
+        if not endpoint_id:
+            continue
+        safe = redact(item)
+        url = str(item.get("url") or item.get("endpoint") or "")
+        display = redact_webhook_url(url)
+        for key in ("url", "endpoint"):
+            if key in safe:
+                safe[key] = display
+        row = await session.get(WebhookEndpoint, endpoint_id) or WebhookEndpoint(id=endpoint_id)
+        row.url_display = display
+        row.subscriptions = [
+            str(value) for value in item.get("subscriptions", item.get("events", [])) or []
+        ]
+        row.enabled = item.get("enabled")
+        row.present = True
+        row.raw = safe
+        row.synced_at = datetime.now(UTC)
+        session.add(row)
+        safe_items.append(safe)
+        succeeded += 1
+    await record_payload(session, "webhooks", safe_items)
+    return len(items), succeeded, 0, {"listed": len(items)}
+
+
+async def sync_webhooks() -> None:
+    await _run_source(
+        kind="webhooks",
+        lock_key=81106,
+        capability_name="webhooks",
+        capability_source="Tailscale webhooks API",
+        requirement="webhooks:read",
+        worker=_webhooks_worker,
+    )
 
 
 async def sync_policy() -> None:
@@ -495,15 +848,16 @@ async def sync_logs(kind: str) -> None:
 def create_scheduler() -> AsyncIOScheduler:
     settings = get_settings()
     scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(
-        sync_inventory,
-        "interval",
-        seconds=settings.inventory_interval_seconds,
-        id="inventory",
-        max_instances=1,
-        coalesce=True,
-        jitter=15,
-    )
+    for source in (sync_users, sync_devices, sync_routes, sync_services, sync_dns, sync_webhooks):
+        scheduler.add_job(
+            source,
+            "interval",
+            seconds=settings.inventory_interval_seconds,
+            id=source.__name__.removeprefix("sync_"),
+            max_instances=1,
+            coalesce=True,
+            jitter=15,
+        )
     scheduler.add_job(
         sync_policy,
         "interval",

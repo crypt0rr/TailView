@@ -6,6 +6,8 @@ import {
   DeviceTable,
   PolicySecurityReview,
   trafficChartData,
+  trafficTimeLabel,
+  trafficVolumeLabel,
 } from "./pages";
 import { TimeRangeProvider, useTimeRange } from "./timeRange";
 import type { AddressInventory, Device } from "./types";
@@ -66,6 +68,14 @@ describe("TailView", () => {
       { bucket_start: "2026-07-21T11:00:00Z", reported_bytes: 0 },
     ]);
     expect(points.map((point) => point.reported)).toEqual([2.5, 0]);
+    expect(points.at(0)?.time).toBe("2026-07-21T10:00:00Z");
+  });
+
+  it("uses compact, bounded traffic-axis labels", () => {
+    expect(trafficVolumeLabel(0)).toBe("0 MB");
+    expect(trafficVolumeLabel(400)).toBe("400 MB");
+    expect(trafficVolumeLabel(1600)).toBe("1.6 GB");
+    expect(trafficTimeLabel("not-a-date")).toBe("not-a-date");
   });
 
   it("restores and persists the global range through the URL", () => {

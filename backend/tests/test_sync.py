@@ -1,14 +1,25 @@
 from datetime import UTC, datetime
 
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+import app.sync as sync_module
+from app.models import Base, Device, ServiceHost, TailnetService, WebhookEndpoint
 from app.sync import (
+    _routes_worker,
+    _services_worker,
+    _webhooks_worker,
     build_address_index,
     build_user_login_index,
     classify,
     parse_time,
     preferred_device_id,
     redact,
+    redact_webhook_url,
     split_endpoint,
 )
+from app.tailscale import TailscaleError
 
 
 def test_classification_is_multi_role_and_deterministic() -> None:
@@ -52,3 +63,133 @@ def test_inventory_identity_mapping_uses_node_id_and_resolves_login_owner() -> N
 
     assert preferred_device_id(device) == "nABC123CNTRL"
     assert users[str(device["user"]).casefold()] == "user-123"
+
+
+def test_webhook_url_redaction_removes_credentials_query_and_fragment() -> None:
+    assert (
+        redact_webhook_url("https://user:secret@example.com:8443/hook?token=secret#fragment")
+        == "https://example.com:8443/hook"
+    )
+
+
+class FakeInventoryClient:
+    async def routes(self, device_id: str) -> dict[str, object]:
+        if device_id == "failed":
+            raise TailscaleError(403, "denied")
+        return {"advertisedRoutes": ["10.0.0.0/8"], "enabledRoutes": ["10.0.0.0/8"]}
+
+    async def services(self) -> list[dict[str, object]]:
+        return [{"id": "svc:web", "name": "svc:web", "addrs": ["100.100.100.10"]}]
+
+    async def service(self, service_id: str) -> dict[str, object]:
+        assert service_id == "svc:web"
+        return {"ports": ["tcp:443"], "status": "Connected", "futureField": "retained"}
+
+    async def service_hosts(self, service_id: str) -> list[dict[str, object]]:
+        return [
+            {
+                "nodeId": "successful",
+                "advertised": True,
+                "approved": True,
+                "status": "Connected",
+                "endpoints": [{"protocol": "tcp", "port": 443, "type": "layer4"}],
+            }
+        ]
+
+    async def service_host_approval(self, service_id: str, device_id: str) -> dict[str, object]:
+        assert service_id == "svc:web" and device_id == "successful"
+        return {"approved": True}
+
+    async def webhooks(self) -> list[dict[str, object]]:
+        return [
+            {
+                "id": "hook-1",
+                "url": "https://user:pass@example.com/hook?secret=value",
+                "subscriptions": ["nodeCreated"],
+                "enabled": True,
+            }
+        ]
+
+
+@pytest.mark.asyncio
+async def test_routes_retain_successes_and_report_partial_results() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        for device_id in ("successful", "failed"):
+            session.add(
+                Device(
+                    id=device_id,
+                    name=device_id,
+                    addresses=[],
+                    tags=[],
+                    advertised_routes=["192.0.2.0/24"],
+                    approved_routes=[],
+                    roles=["standard_node"],
+                    primary_role="standard_node",
+                    raw={},
+                )
+            )
+        await session.commit()
+        attempted, succeeded, failed, details = await _routes_worker(
+            session,
+            FakeInventoryClient(),  # type: ignore[arg-type]
+        )
+        assert (attempted, succeeded, failed) == (2, 1, 1)
+        assert details["failure_statuses"] == {"permission_denied": 1}
+        assert (await session.get(Device, "successful")).advertised_routes == ["10.0.0.0/8"]  # type: ignore[union-attr]
+        assert (await session.get(Device, "failed")).advertised_routes == ["192.0.2.0/24"]  # type: ignore[union-attr]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_services_and_webhooks_are_normalized_without_secret_urls() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        client = FakeInventoryClient()
+        assert (await _services_worker(session, client))[1:] == (
+            1,
+            0,
+            {"listed": 1, "failure_statuses": {}},
+        )  # type: ignore[arg-type]
+        assert (await _webhooks_worker(session, client))[:3] == (1, 1, 0)  # type: ignore[arg-type]
+        await session.commit()
+        service = await session.get(TailnetService, "svc:web")
+        assert service and service.status == "connected" and service.ports == ["tcp:443"]
+        host = await session.scalar(select(ServiceHost))
+        assert host and host.device_id == "successful" and host.approved is True
+        webhook = await session.get(WebhookEndpoint, "hook-1")
+        assert webhook and webhook.url_display == "https://example.com/hook"
+        assert webhook.raw["url"] == "https://example.com/hook"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_inventory_orchestrator_continues_after_one_source_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def source(name: str, *, fail: bool = False):  # type: ignore[no-untyped-def]
+        async def run() -> None:
+            calls.append(name)
+            if fail:
+                raise RuntimeError("source failed")
+
+        return run
+
+    monkeypatch.setattr(sync_module, "sync_users", source("users", fail=True))
+    monkeypatch.setattr(sync_module, "sync_devices", source("devices"))
+    monkeypatch.setattr(sync_module, "sync_routes", source("routes"))
+    monkeypatch.setattr(sync_module, "sync_services", source("services"))
+    monkeypatch.setattr(sync_module, "sync_dns", source("dns"))
+    monkeypatch.setattr(sync_module, "sync_webhooks", source("webhooks"))
+
+    await sync_module.sync_inventory()
+
+    assert calls == ["users", "devices", "routes", "services", "dns", "webhooks"]
