@@ -220,6 +220,7 @@ function TrafficChart() {
 
 export function Devices({ role = "" }: { role?: string }) {
   const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<Device | null>(null);
   const query = useQuery({
     queryKey: ["devices", search, role],
     queryFn: () =>
@@ -250,12 +251,21 @@ export function Devices({ role = "" }: { role?: string }) {
           detail="Adjust filters or check device synchronization."
         />
       ) : (
-        <DeviceTable devices={query.data.items} />
+        <DeviceTable devices={query.data.items} onSelect={setSelected} />
+      )}
+      {selected && (
+        <NodeDrawer device={selected} close={() => setSelected(null)} />
       )}
     </div>
   );
 }
-function DeviceTable({ devices }: { devices: Device[] }) {
+export function DeviceTable({
+  devices,
+  onSelect,
+}: {
+  devices: Device[];
+  onSelect: (device: Device) => void;
+}) {
   return (
     <Card className="table-card">
       <div className="table-scroll">
@@ -274,9 +284,30 @@ function DeviceTable({ devices }: { devices: Device[] }) {
           </thead>
           <tbody>
             {devices.map((d) => (
-              <tr key={d.id}>
+              <tr
+                key={d.id}
+                className="device-row"
+                tabIndex={0}
+                aria-label={`Open details for ${d.name}`}
+                onClick={() => onSelect(d)}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return;
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect(d);
+                  }
+                }}
+              >
                 <td>
-                  <a href={`/topology?node=${d.id}`} className="device-name">
+                  <button
+                    type="button"
+                    className="device-name"
+                    aria-label={`View details for ${d.name}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onSelect(d);
+                    }}
+                  >
                     <span className="device-icon">
                       {roleIcon(d.primary_role)}
                     </span>
@@ -284,7 +315,7 @@ function DeviceTable({ devices }: { devices: Device[] }) {
                       <strong>{d.name}</strong>
                       <small>{d.hostname}</small>
                     </span>
-                  </a>
+                  </button>
                 </td>
                 <td>
                   <Status online={d.online} />
@@ -307,13 +338,17 @@ function DeviceTable({ devices }: { devices: Device[] }) {
                 </td>
                 <td>{relativeTime(d.last_seen)}</td>
                 <td>
-                  <a
+                  <button
+                    type="button"
                     className="icon-button"
-                    href={`/topology?node=${d.id}`}
-                    aria-label={`Open ${d.name}`}
+                    aria-label={`Open details for ${d.name}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onSelect(d);
+                    }}
                   >
                     <ChevronRight />
-                  </a>
+                  </button>
                 </td>
               </tr>
             ))}
@@ -336,6 +371,14 @@ export function Topology() {
   });
   const container = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
+  useEffect(() => {
+    const requestedNode = new URLSearchParams(window.location.search).get(
+      "node",
+    );
+    if (!requestedNode || !query.data) return;
+    const device = query.data.nodes.find((node) => node.id === requestedNode);
+    if (device) setSelected(device);
+  }, [query.data]);
   useEffect(() => {
     if (!container.current || !query.data) return;
     const filtered = query.data.nodes.filter((n) =>
@@ -524,8 +567,22 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
   });
   const d = detail.data ?? device;
   const [tab, setTab] = useState("overview");
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [close]);
   return (
-    <aside className="drawer">
+    <>
+      <div className="drawer-backdrop" aria-hidden="true" onClick={close} />
+      <aside
+        className="drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Device details for ${d.name}`}
+      >
       <div className="drawer-head">
         <div className="large-node-icon">{roleIcon(d.primary_role)}</div>
         <div>
@@ -533,7 +590,11 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
           <h2>{d.name.split(".")[0]}</h2>
           <Status online={d.online} />
         </div>
-        <button className="icon-button" onClick={close}>
+        <button
+          className="icon-button"
+          onClick={close}
+          aria-label="Close device details"
+        >
           <X />
         </button>
       </div>
@@ -630,14 +691,15 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
         )}
       </div>
       <div className="drawer-foot">
-        <Button variant="secondary">
+        <a className="button secondary" href="/flows">
           <List /> Open flows
-        </Button>
-        <Button>
-          <ShieldCheck /> View policy
-        </Button>
+        </a>
+        <a className="button primary" href={`/topology?node=${d.id}`}>
+          <Network /> Show in topology
+        </a>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }
 function AccessSummary() {
