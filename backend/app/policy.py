@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +37,79 @@ def parse_policy(source: str) -> ParsedPolicy:
         raise ValueError("Policy root must be an object")
     unsupported = sorted(str(key) for key in parsed if key not in SUPPORTED)
     return ParsedPolicy(hashlib.sha256(source.encode()).hexdigest(), parsed, unsupported)
+
+
+def _path_key(path: str, key: str) -> str:
+    return f"{path}[{json.dumps(key, ensure_ascii=False)}]"
+
+
+def _deduplicate_value(value: Any, path: str, findings: list[dict[str, Any]]) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _deduplicate_value(item, _path_key(path, str(key)), findings)
+            for key, item in value.items()
+        }
+    if not isinstance(value, list):
+        return value
+
+    result: list[Any] = []
+    seen: dict[str, int] = {}
+    for index, item in enumerate(value):
+        nested_findings: list[dict[str, Any]] = []
+        cleaned = _deduplicate_value(item, f"{path}[{index}]", nested_findings)
+        canonical = json.dumps(cleaned, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if canonical in seen:
+            findings.append(
+                {
+                    "kind": "exact_duplicate_array_entry",
+                    "path": path,
+                    "first_index": seen[canonical],
+                    "duplicate_index": index,
+                    "value_preview": canonical[:500],
+                    "proof": "Canonical JSON values are identical",
+                }
+            )
+            continue
+        findings.extend(nested_findings)
+        seen[canonical] = index
+        result.append(cleaned)
+    return result
+
+
+def review_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    """Create a conservative, non-mutating duplicate-removal candidate.
+
+    Only arrays nested under documented policy sections are deduplicated. Unknown
+    top-level constructs are copied without interpretation or modification.
+    """
+    candidate = deepcopy(policy)
+    findings: list[dict[str, Any]] = []
+    for section, value in policy.items():
+        if section in SUPPORTED:
+            candidate[section] = _deduplicate_value(value, _path_key("$", section), findings)
+    candidate_source = json.dumps(candidate, indent=2, ensure_ascii=False) + "\n"
+    original_canonical = json.dumps(
+        policy, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    candidate_canonical = json.dumps(
+        candidate, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return {
+        "duplicate_count": len(findings),
+        "changed": original_canonical != candidate_canonical,
+        "findings": findings,
+        "candidate": candidate_source,
+        "candidate_sha256": hashlib.sha256(candidate_source.encode()).hexdigest(),
+        "review_scope": "Exact duplicate array entries in documented policy sections only",
+        "validation": "not_run",
+        "requires_upstream_validation": True,
+        "comments_preserved": False,
+        "notice": (
+            "Read-only suggestion. TailView never applies policy changes. The candidate is "
+            "strict JSON (valid HuJSON) and omits source comments; validate it with Tailscale "
+            "before any manual replacement."
+        ),
+    }
 
 
 def source_line(source: str, fragment: str) -> tuple[int | None, int | None]:

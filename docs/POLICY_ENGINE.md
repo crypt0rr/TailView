@@ -15,3 +15,8 @@ Statuses are `fully_evaluated`, `partially_evaluated`, `unsupported_construct`, 
 
 Historical observations without a current allow are labelled: “Observed historically; no matching allow rule exists in the current policy. The policy may have changed after this flow occurred.” This is never automatically described as a policy bypass.
 
+## Duplicate review
+
+The Policy Explorer can produce a conservative duplicate review. It recursively removes only canonically identical array entries inside documented policy sections. Unsupported top-level sections are copied without interpretation, and TailView never submits or applies the generated candidate.
+
+The candidate is regenerated as strict JSON, which is valid HuJSON, but original comments and formatting are not retained. It must therefore be treated as a review artifact and validated with Tailscale before any manual replacement. TailView does not combine overlapping selectors, reorder rules, infer semantic equivalence, or perform other speculative optimizations.

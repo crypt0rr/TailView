@@ -1,4 +1,6 @@
-from app.policy import evaluate_policy, expand_selector, parse_policy, source_line
+import json
+
+from app.policy import evaluate_policy, expand_selector, parse_policy, review_policy, source_line
 
 POLICY = """{
   // Comment and trailing commas are HuJSON-compatible.
@@ -40,3 +42,30 @@ def test_unknown_autogroup_is_not_guessed() -> None:
     expanded, _, status = expand_selector("autogroup:future", {}, [], [])
     assert expanded == []
     assert status == "unsupported_construct"
+
+
+def test_duplicate_review_removes_only_exact_entries_without_mutating_source() -> None:
+    grant = {"src": ["group:eng"], "dst": ["tag:api", "tag:api"], "ip": ["tcp:443"]}
+    policy = {
+        "groups": {"group:eng": ["alice@example.com", "alice@example.com"]},
+        "grants": [grant, grant],
+        "futureThing": {"ordered": ["same", "same"]},
+    }
+
+    review = review_policy(policy)
+    candidate = json.loads(review["candidate"])
+
+    assert review["duplicate_count"] == 3
+    assert candidate["groups"]["group:eng"] == ["alice@example.com"]
+    assert candidate["grants"] == [{"src": ["group:eng"], "dst": ["tag:api"], "ip": ["tcp:443"]}]
+    assert candidate["futureThing"]["ordered"] == ["same", "same"]
+    assert policy["grants"][0]["dst"] == ["tag:api", "tag:api"]
+    assert review["requires_upstream_validation"] is True
+    assert review["comments_preserved"] is False
+
+
+def test_duplicate_review_returns_unchanged_candidate_when_none_exist() -> None:
+    review = review_policy({"grants": [{"src": ["*"], "dst": ["tag:web"]}]})
+
+    assert review["duplicate_count"] == 0
+    assert review["changed"] is False

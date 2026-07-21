@@ -31,7 +31,7 @@ from .models import (
     TailnetUser,
     TelemetryObservation,
 )
-from .policy import evaluate_policy
+from .policy import evaluate_policy, review_policy
 from .schemas import CredentialRequest, LoginRequest, MetadataUpdate, SetupRequest, UserResponse
 from .security import SecretBox
 from .sync import sync_inventory, sync_logs, sync_policy
@@ -574,6 +574,25 @@ async def policy(_: Authed, db: Db) -> dict[str, Any]:
         "unsupported": snapshot.unsupported,
         "retrieved_at": snapshot.retrieved_at,
         "notice": "Read-only current policy; absence of a rule means no matching allow rule.",
+    }
+
+
+@router.get("/policy/review")
+async def policy_review(_: Authed, db: Db) -> dict[str, Any]:
+    snapshot = await db.scalar(
+        select(PolicySnapshot)
+        .where(PolicySnapshot.valid.is_(True))
+        .order_by(PolicySnapshot.retrieved_at.desc())
+        .limit(1)
+    )
+    if not snapshot:
+        return {"available": False, "status": "No valid policy snapshot is available"}
+    result = review_policy(snapshot.normalized)
+    return {
+        "available": True,
+        "source_snapshot_id": snapshot.id,
+        "retrieved_at": snapshot.retrieved_at,
+        **result,
     }
 
 

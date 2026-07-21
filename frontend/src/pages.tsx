@@ -909,6 +909,11 @@ export function Policy() {
     queryFn: () => request<any>("/policy"),
   });
   const [tab, setTab] = useState("normalized");
+  const review = useQuery({
+    queryKey: ["policy-review", query.data?.id],
+    queryFn: () => request<any>("/policy/review"),
+    enabled: tab === "review" && Boolean(query.data?.available),
+  });
   if (query.isLoading) return <Loading />;
   if (query.error) return <ErrorState error={query.error} />;
   if (!query.data.available)
@@ -977,6 +982,12 @@ export function Policy() {
             >
               Raw HuJSON
             </button>
+            <button
+              className={tab === "review" ? "active" : ""}
+              onClick={() => setTab("review")}
+            >
+              Duplicate review
+            </button>
           </div>
           {tab === "raw" ? (
             <Card className="code-card">
@@ -991,6 +1002,8 @@ export function Policy() {
               </div>
               <pre>{p.hujson}</pre>
             </Card>
+          ) : tab === "review" ? (
+            <PolicyDuplicateReview query={review} />
           ) : (
             sections.map(([name, value]) => (
               <Card className="policy-section" key={name}>
@@ -1004,6 +1017,111 @@ export function Policy() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function PolicyDuplicateReview({ query }: { query: any }) {
+  if (query.isLoading) return <Loading />;
+  if (query.error) return <ErrorState error={query.error} />;
+  if (!query.data?.available) {
+    return (
+      <Empty
+        title="Policy review unavailable"
+        detail={query.data?.status ?? "No valid policy snapshot is available."}
+      />
+    );
+  }
+  const review = query.data;
+  const download = () => {
+    const url = URL.createObjectURL(
+      new Blob([review.candidate], { type: "application/json" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tailview-policy-candidate-${review.candidate_sha256.slice(0, 12)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <div className="review-stack">
+      <Card className="review-summary">
+        <div>
+          <span className="eyebrow">CONSERVATIVE REVIEW</span>
+          <h3>
+            {review.duplicate_count
+              ? `${review.duplicate_count} exact duplicate${review.duplicate_count === 1 ? "" : "s"} found`
+              : "No exact duplicates found"}
+          </h3>
+          <p>{review.review_scope}</p>
+        </div>
+        <Badge tone={review.changed ? "warning" : "success"}>
+          {review.changed ? "Candidate available" : "Already minimal"}
+        </Badge>
+      </Card>
+      <div className="notice-bar blue">
+        <ShieldCheck />
+        <span>
+          <strong>Read-only by design.</strong> TailView never submits this
+          candidate. Only canonically identical array entries are removed;
+          unknown policy sections remain untouched.
+        </span>
+      </div>
+      {review.changed && (
+        <>
+          <Card className="review-findings">
+            <CardHead
+              title="Proven duplicate entries"
+              detail="Duplicate indexes are zero-based within each policy array."
+            />
+            <div className="finding-list">
+              {review.findings
+                .slice(0, 200)
+                .map((finding: any, index: number) => (
+                  <div
+                    key={`${finding.path}-${finding.duplicate_index}-${index}`}
+                  >
+                    <CheckCircle2 />
+                    <div>
+                      <code>{finding.path}</code>
+                      <strong>
+                        Entry {finding.duplicate_index} duplicates entry {finding.first_index}
+                      </strong>
+                      <small>{finding.proof}</small>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </Card>
+          <Card className="code-card candidate-card">
+            <div className="code-head">
+              <span>
+                Suggested strict JSON · {review.candidate_sha256.slice(0, 12)}…
+              </span>
+              <div>
+                <Button variant="ghost" onClick={download}>
+                  <Download /> Download
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => navigator.clipboard.writeText(review.candidate)}
+                >
+                  <Copy /> Copy candidate
+                </Button>
+              </div>
+            </div>
+            <pre>{review.candidate}</pre>
+          </Card>
+          <div className="notice-bar warning">
+            <AlertTriangle />
+            <span>
+              <strong>Validate before manual use.</strong> The candidate is valid
+              HuJSON-compatible strict JSON, but comments and formatting from the
+              original source are not retained. Upstream validation status: {review.validation}.
+            </span>
+          </div>
+        </>
+      )}
     </div>
   );
 }

@@ -1270,6 +1270,74 @@ td small {
   border-radius: 0;
   max-height: 65vh;
 }
+.review-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.review-summary {
+  padding: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.review-summary h3 {
+  margin: 5px 0;
+}
+.review-summary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+.review-findings {
+  overflow: hidden;
+}
+.review-findings > .card-head {
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.finding-list {
+  max-height: 380px;
+  overflow: auto;
+}
+.finding-list > div {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 18px;
+  border-top: 1px solid var(--border);
+}
+.finding-list > div:first-child {
+  border-top: 0;
+}
+.finding-list svg {
+  width: 16px;
+  color: var(--accent);
+  flex: none;
+}
+.finding-list code,
+.finding-list strong,
+.finding-list small {
+  display: block;
+}
+.finding-list code {
+  color: var(--accent-bright);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+.finding-list strong {
+  margin-top: 4px;
+  font-size: 10px;
+}
+.finding-list small {
+  margin-top: 2px;
+  color: var(--muted);
+}
+.candidate-card .code-head > div {
+  display: flex;
+  gap: 5px;
+}
 .settings-grid {
   display: grid;
   grid-template-columns: 1fr;
