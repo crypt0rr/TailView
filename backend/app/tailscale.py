@@ -63,14 +63,27 @@ class TailscaleClient:
             detail = "Upstream request failed"
         raise TailscaleError(response.status_code, str(detail), retry_after)
 
-    async def get(self, path: str, params: dict[str, str] | None = None) -> Any:
+    async def get(
+        self,
+        path: str,
+        params: dict[str, str] | None = None,
+        *,
+        read_timeout: float = 30,
+    ) -> Any:
         token = await self._token()
         for attempt in range(4):
-            response = await self.http.get(
-                f"{self.base_url}{path}",
-                params=params,
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            )
+            try:
+                response = await self.http.get(
+                    f"{self.base_url}{path}",
+                    params=params,
+                    headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                    timeout=httpx.Timeout(30, read=read_timeout),
+                )
+            except httpx.TransportError as exc:
+                if attempt == 3:
+                    raise TailscaleError(0, "Upstream network request failed") from exc
+                await asyncio.sleep(2**attempt)
+                continue
             if response.status_code not in {429, 502, 503, 504}:
                 self._raise(response)
                 return response.json()
@@ -106,6 +119,7 @@ class TailscaleClient:
         body = await self.get(
             f"/tailnet/{self.tailnet}/logging/network",
             {"start": start.isoformat(), "end": end.isoformat()},
+            read_timeout=90,
         )
         return list(body.get("logs", []))
 

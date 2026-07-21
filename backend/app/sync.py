@@ -9,10 +9,10 @@ from typing import Any
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from .config import Settings, get_settings
-from .db import SessionLocal
+from .db import SessionLocal, engine
 from .models import (
     AuditEvent,
     Capability,
@@ -76,15 +76,29 @@ async def client_for(session: AsyncSession, settings: Settings) -> TailscaleClie
     )
 
 
-async def lock_job(session: AsyncSession, key: int) -> bool:
-    if session.bind and session.bind.dialect.name == "postgresql":
-        return bool(await session.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}))
-    return True
+async def lock_job(key: int) -> AsyncConnection | None:
+    """Acquire a session advisory lock on a pinned database connection."""
+    connection = await engine.connect()
+    if connection.dialect.name != "postgresql":
+        return connection
+    acquired = bool(
+        await connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
+    )
+    await connection.commit()
+    if not acquired:
+        await connection.close()
+        return None
+    return connection
 
 
-async def unlock_job(session: AsyncSession, key: int) -> None:
-    if session.bind and session.bind.dialect.name == "postgresql":
-        await session.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+async def unlock_job(connection: AsyncConnection, key: int) -> None:
+    """Release an advisory lock using the same connection that acquired it."""
+    try:
+        if connection.dialect.name == "postgresql":
+            await connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+            await connection.commit()
+    finally:
+        await connection.close()
 
 
 async def record_payload(session: AsyncSession, source: str, payload: Any) -> None:
@@ -127,7 +141,8 @@ def build_user_login_index(users: Iterable[tuple[str, str]]) -> dict[str, str]:
 async def sync_inventory() -> None:
     settings = get_settings()
     async with SessionLocal() as session:
-        if not await lock_job(session, 81001):
+        lock = await lock_job(81001)
+        if lock is None:
             return
         job = SyncJob(kind="inventory", status="running")
         session.add(job)
@@ -139,7 +154,7 @@ async def sync_inventory() -> None:
             job.error = "No Tailscale credentials configured"
             job.finished_at = datetime.now(UTC)
             await session.commit()
-            await unlock_job(session, 81001)
+            await unlock_job(lock, 81001)
             return
         processed = 0
         try:
@@ -248,13 +263,14 @@ async def sync_inventory() -> None:
             job.finished_at = datetime.now(UTC)
             await session.commit()
             await client.close()
-            await unlock_job(session, 81001)
+            await unlock_job(lock, 81001)
 
 
 async def sync_policy() -> None:
     settings = get_settings()
     async with SessionLocal() as session:
-        if not await lock_job(session, 81002):
+        lock = await lock_job(81002)
+        if lock is None:
             return
         job = SyncJob(kind="policy", status="running")
         session.add(job)
@@ -265,7 +281,7 @@ async def sync_policy() -> None:
             job.error = "No Tailscale credentials configured"
             job.finished_at = datetime.now(UTC)
             await session.commit()
-            await unlock_job(session, 81002)
+            await unlock_job(lock, 81002)
             return
         try:
             source = await client.policy()
@@ -291,7 +307,7 @@ async def sync_policy() -> None:
             job.finished_at = datetime.now(UTC)
             await session.commit()
             await client.close()
-            await unlock_job(session, 81002)
+            await unlock_job(lock, 81002)
 
 
 def split_endpoint(value: str) -> tuple[str, int | None]:
@@ -328,7 +344,8 @@ async def sync_logs(kind: str) -> None:
     settings = get_settings()
     key = 81003 if kind == "flows" else 81004
     async with SessionLocal() as session:
-        if not await lock_job(session, key):
+        lock = await lock_job(key)
+        if lock is None:
             return
         job = SyncJob(kind=kind, status="running")
         session.add(job)
@@ -340,7 +357,7 @@ async def sync_logs(kind: str) -> None:
             job.error = "No Tailscale credentials configured"
             job.finished_at = datetime.now(UTC)
             await session.commit()
-            await unlock_job(session, key)
+            await unlock_job(lock, key)
             return
         end = datetime.now(UTC)
         start = end - timedelta(minutes=11)
@@ -436,7 +453,7 @@ async def sync_logs(kind: str) -> None:
             job.finished_at = datetime.now(UTC)
             await session.commit()
             await client.close()
-            await unlock_job(session, key)
+            await unlock_job(lock, key)
 
 
 def create_scheduler() -> AsyncIOScheduler:

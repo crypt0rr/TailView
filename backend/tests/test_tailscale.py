@@ -29,3 +29,23 @@ async def test_permission_error_is_safe_and_classified() -> None:
     assert caught.value.status == 403
     assert capability_status(caught.value) == "permission_denied"
     await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_client_retries_read_timeout_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.tailscale.asyncio.sleep", no_sleep)
+    route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/devices").mock(
+        side_effect=[
+            httpx.ReadTimeout("slow upstream response"),
+            httpx.Response(200, json={"devices": [{"nodeId": "n1"}]}),
+        ]
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert await client.devices() == [{"nodeId": "n1"}]
+    assert route.call_count == 2
+    await client.close()
