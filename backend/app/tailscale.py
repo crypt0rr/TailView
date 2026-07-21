@@ -106,6 +106,10 @@ class TailscaleClient:
         body = await self.get(f"/tailnet/{self.tailnet}/devices")
         return list(body.get("devices", []))
 
+    async def device(self, device_id: str) -> dict[str, Any]:
+        encoded = quote(device_id, safe="")
+        return dict(await self.get(f"/device/{encoded}"))
+
     async def users(self) -> list[dict[str, Any]]:
         body = await self.get(f"/tailnet/{self.tailnet}/users")
         return list(body.get("users", []))

@@ -19,6 +19,22 @@ async def test_device_client_uses_bearer_and_documented_path() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_device_detail_uses_encoded_stable_id() -> None:
+    route = respx.get("https://api.tailscale.com/api/v2/device/node%2Fone").mock(
+        return_value=httpx.Response(
+            200,
+            json={"nodeId": "node/one", "keyExpiryDisabled": True},
+        )
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+    result = await client.device("node/one")
+    assert route.called
+    assert result["keyExpiryDisabled"] is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_permission_error_is_safe_and_classified() -> None:
     respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/users").mock(
         return_value=httpx.Response(403, json={"message": "denied"})

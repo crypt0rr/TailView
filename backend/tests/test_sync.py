@@ -80,7 +80,6 @@ class FakeInventoryClient:
                 "nodeId": "disabled-device",
                 "name": "disabled.example.ts.net",
                 "expires": "2024-01-01T00:00:00Z",
-                "keyExpiryDisabled": True,
             },
             {
                 "nodeId": "unknown-device",
@@ -88,6 +87,11 @@ class FakeInventoryClient:
                 "expires": "2026-08-01T00:00:00Z",
             },
         ]
+
+    async def device(self, device_id: str) -> dict[str, object]:
+        if device_id == "disabled-device":
+            return {"nodeId": device_id, "keyExpiryDisabled": True}
+        return {"nodeId": device_id}
 
     async def routes(self, device_id: str) -> dict[str, object]:
         if device_id == "failed":
@@ -134,13 +138,52 @@ async def test_devices_normalize_key_expiry_disabled_without_inference() -> None
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
-        assert (await _devices_worker(session, FakeInventoryClient()))[:3] == (2, 2, 0)  # type: ignore[arg-type]
+        result = await _devices_worker(session, FakeInventoryClient())  # type: ignore[arg-type]
+        assert result[:3] == (2, 2, 0)
+        assert result[3]["detail_succeeded"] == 2
         await session.commit()
         disabled = await session.get(Device, "disabled-device")
         unknown = await session.get(Device, "unknown-device")
         assert disabled and disabled.key_expiry_disabled is True
         assert disabled.key_expiry and disabled.key_expiry.date().isoformat() == "2024-01-01"
         assert unknown and unknown.key_expiry_disabled is None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_device_detail_failure_preserves_last_reported_expiry_state() -> None:
+    class FailingDetailClient:
+        async def devices(self) -> list[dict[str, object]]:
+            return [{"nodeId": "server", "name": "server.example.ts.net"}]
+
+        async def device(self, device_id: str) -> dict[str, object]:
+            raise TailscaleError(503, "unavailable")
+
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        existing = Device(
+            id="server",
+            name="server.example.ts.net",
+            key_expiry_disabled=True,
+            addresses=[],
+            tags=[],
+            advertised_routes=[],
+            approved_routes=[],
+            roles=["standard_node"],
+            primary_role="standard_node",
+            raw={},
+        )
+        session.add(existing)
+        await session.commit()
+
+        result = await _devices_worker(session, FailingDetailClient())  # type: ignore[arg-type]
+        await session.commit()
+
+        assert result[3]["detail_failure_statuses"] == {"upstream_error": 1}
+        assert (await session.get(Device, "server")).key_expiry_disabled is True  # type: ignore[union-attr]
     await engine.dispose()
 
 

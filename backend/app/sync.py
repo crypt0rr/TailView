@@ -297,11 +297,35 @@ async def sync_users() -> None:
 async def _devices_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
     items = await client.devices()
     await record_payload(session, "devices", items)
+    semaphore = asyncio.Semaphore(8)
+
+    async def enrich(item: dict[str, Any]) -> tuple[dict[str, Any], bool, str | None]:
+        if isinstance(item.get("keyExpiryDisabled"), bool):
+            return item, False, None
+        upstream_id = preferred_device_id(item)
+        if not upstream_id:
+            return item, False, "missing_id"
+        try:
+            async with semaphore:
+                details = await client.device(upstream_id)
+            return {**item, **details}, True, None
+        except TailscaleError as exc:
+            return item, True, capability_status(exc)
+
+    enriched = await asyncio.gather(*(enrich(item) for item in items))
     await session.execute(update(Device).values(active=False))
     rows = (await session.execute(select(TailnetUser.id, TailnetUser.login_name))).all()
     owner_ids = build_user_login_index((row[0], row[1]) for row in rows)
     succeeded = 0
-    for item in items:
+    detail_succeeded = 0
+    detail_failures: Counter[str] = Counter()
+    detail_attempted = 0
+    for item, detail_was_attempted, detail_error in enriched:
+        detail_attempted += int(detail_was_attempted)
+        if detail_error:
+            detail_failures[detail_error] += 1
+        elif detail_was_attempted:
+            detail_succeeded += 1
         upstream_id = preferred_device_id(item)
         if not upstream_id:
             continue
@@ -318,7 +342,10 @@ async def _devices_worker(session: AsyncSession, client: TailscaleClient) -> Sou
         device.created = parse_time(item.get("created"))
         device.key_expiry = parse_time(item.get("expires"))
         expiry_disabled = item.get("keyExpiryDisabled")
-        device.key_expiry_disabled = expiry_disabled if isinstance(expiry_disabled, bool) else None
+        if isinstance(expiry_disabled, bool):
+            device.key_expiry_disabled = expiry_disabled
+        elif detail_error is None:
+            device.key_expiry_disabled = None
         device.addresses = list(item.get("addresses") or [])
         device.tags = list(item.get("tags") or [])
         advertised = list(item.get("advertisedRoutes") or device.advertised_routes or [])
@@ -327,7 +354,18 @@ async def _devices_worker(session: AsyncSession, client: TailscaleClient) -> Sou
         device.synced_at = datetime.now(UTC)
         session.add(device)
         succeeded += 1
-    return len(items), succeeded, 0, {"listed": len(items)}
+    return (
+        len(items),
+        succeeded,
+        0,
+        {
+            "listed": len(items),
+            "detail_attempted": detail_attempted,
+            "detail_succeeded": detail_succeeded,
+            "detail_failed": sum(detail_failures.values()),
+            "detail_failure_statuses": dict(detail_failures),
+        },
+    )
 
 
 async def sync_devices() -> None:
