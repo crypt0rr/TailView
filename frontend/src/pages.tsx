@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import cytoscape from "cytoscape";
 import {
@@ -18,6 +23,7 @@ import {
   List,
   Maximize2,
   Network,
+  RefreshCw,
   Search,
   ShieldCheck,
   SlidersHorizontal,
@@ -58,6 +64,7 @@ import {
 import type {
   AddressInventory,
   Device,
+  DnsConfiguration,
   FlowRecord,
   FlowDeviceTraffic,
   FlowSummary,
@@ -2099,15 +2106,177 @@ function GenericTable({
   );
 }
 
+function dnsValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "Not reported";
+  if (typeof value === "boolean") return value ? "Enabled" : "Disabled";
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  return JSON.stringify(value);
+}
+
+export function dnsConfigurationEntries(
+  value: Record<string, unknown> | undefined,
+): Array<[string, unknown]> {
+  if (!value) return [];
+  return Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
+}
+
+function DnsConfigurationRows({ value }: { value: Record<string, unknown> }) {
+  return (
+    <div className="dns-config-rows">
+      {dnsConfigurationEntries(value).map(([key, item]) => (
+        <div className="dns-config-row" key={key}>
+          <strong>{key.replaceAll("_", " ")}</strong>
+          {item && typeof item === "object" && !Array.isArray(item) ? (
+            <DnsConfigurationRows value={item as Record<string, unknown>} />
+          ) : (
+            <code>{Array.isArray(item) ? item.map(dnsValue).join(", ") : dnsValue(item)}</code>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ReportedSetting({ label, value }: { label: string; value: boolean | null | undefined }) {
+  const reported = value !== null && value !== undefined;
+  return (
+    <div className="setting-row">
+      <div>
+        <strong>{label}</strong>
+        <p>Reported by the Tailscale DNS preferences API.</p>
+      </div>
+      <Badge tone={!reported ? "neutral" : value ? "success" : "warning"}>
+        {!reported ? "Not reported" : value ? "Enabled" : "Disabled"}
+      </Badge>
+    </div>
+  );
+}
+
+export function DnsSettings() {
+  const qc = useQueryClient();
+  const query = useQuery({
+    queryKey: ["settings-dns"],
+    queryFn: () => request<DnsConfiguration>("/settings/dns"),
+  });
+  const synchronize = useMutation({
+    mutationFn: () => request("/sync/dns", { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings-dns"] }),
+  });
+  const dns = query.data;
+  const splitEntries = dnsConfigurationEntries(dns?.split_dns);
+  return (
+    <div className="page">
+      <PageHead
+        eyebrow="TAILNET CONFIGURATION"
+        title="DNS settings"
+        description="Read-only DNS configuration synchronized from every documented Tailscale DNS read endpoint."
+        actions={
+          <Button
+            variant="secondary"
+            onClick={() => synchronize.mutate()}
+            disabled={synchronize.isPending}
+          >
+            <RefreshCw size={16} /> {synchronize.isPending ? "Synchronizing…" : "Sync DNS"}
+          </Button>
+        }
+      />
+      {query.isLoading ? (
+        <Loading />
+      ) : query.error ? (
+        <ErrorState error={query.error} />
+      ) : !dns?.available ? (
+        <Empty
+          title="DNS configuration unavailable"
+          detail={`Capability status: ${dns?.status?.replaceAll("_", " ") ?? "unknown"}. OAuth requires dns:read or all:read.`}
+        />
+      ) : (
+        <>
+          <Card className="settings-card dns-provenance">
+            <div>
+              <Badge tone={dns.stale ? "warning" : "success"}>
+                {dns.stale ? "Last-good snapshot" : "Current snapshot"}
+              </Badge>
+              <p>
+                Configuration only. DNS queries, answers, URLs, and per-device resolver state are not supplied by these management endpoints.
+              </p>
+            </div>
+            <div>
+              <Detail label="Source" value={dns.source || "Tailscale DNS API"} />
+              <Detail label="Required scope" value={dns.required_scope || "dns:read"} />
+              <Detail label="Synchronized" value={relativeTime(dns.synced_at ?? null)} />
+              <Detail label="Capability checked" value={relativeTime(dns.checked_at)} />
+            </div>
+          </Card>
+          {synchronize.error && <ErrorState error={synchronize.error} />}
+          <div className="dns-grid">
+            <Card className="settings-card">
+              <CardHead title="Preferences" detail="Tailnet-wide resolver behavior." />
+              <ReportedSetting label="MagicDNS" value={dns.magic_dns} />
+              <ReportedSetting label="Override local DNS" value={dns.override_local_dns} />
+            </Card>
+            <Card className="settings-card">
+              <CardHead title="Search domains" detail="Suffixes appended to non-fully-qualified names." />
+              {dns.search_paths?.length ? (
+                <div className="dns-chip-list">
+                  {dns.search_paths.map((path) => <code key={path}>{path}</code>)}
+                </div>
+              ) : (
+                <Empty title="No search domains" detail="None were reported by the API." />
+              )}
+            </Card>
+            <Card className="settings-card full">
+              <CardHead title="Nameservers" detail="Global and structured resolver entries exactly as reported." />
+              {dns.nameservers?.length ? (
+                <div className="dns-list">
+                  {dns.nameservers.map((server, index) => (
+                    <div className="dns-list-item" key={`${dnsValue(server)}-${index}`}>
+                      <span>{index + 1}</span>
+                      {server && typeof server === "object" && !Array.isArray(server) ? (
+                        <DnsConfigurationRows value={server as Record<string, unknown>} />
+                      ) : (
+                        <code>{dnsValue(server)}</code>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Empty title="No nameservers" detail="No custom nameservers were reported." />
+              )}
+            </Card>
+            <Card className="settings-card full">
+              <CardHead title="Split DNS" detail="Restricted domains and their resolver routing configuration." />
+              {splitEntries.length ? (
+                <DnsConfigurationRows value={dns.split_dns ?? {}} />
+              ) : (
+                <Empty title="No split DNS configuration" detail="No restricted-domain routes were reported." />
+              )}
+            </Card>
+            <Card className="settings-card full">
+              <CardHead title="API coverage" detail="The complete documented read surface used by TailView." />
+              <div className="dns-endpoints">
+                {[
+                  ["Preferences", "GET …/dns/preferences"],
+                  ["Nameservers", "GET …/dns/nameservers"],
+                  ["Search paths", "GET …/dns/searchpaths"],
+                  ["Split DNS", "GET …/dns/split-dns"],
+                ].map(([label, endpoint]) => (
+                  <div className="setting-row" key={endpoint}>
+                    <strong>{label}</strong><code>{endpoint}</code>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage({ user }: { user: { role: string } }) {
   const query = useQuery({
     queryKey: ["capabilities"],
     queryFn: () => request<Page<any>>("/capabilities"),
-  });
-  const dns = useQuery({
-    queryKey: ["settings-dns"],
-    queryFn: () => request<any>("/settings/dns"),
-    enabled: user.role === "administrator",
   });
   const webhooks = useQuery({
     queryKey: ["settings-webhooks"],
@@ -2211,14 +2380,9 @@ export function SettingsPage({ user }: { user: { role: string } }) {
         </Card>
         {user.role === "administrator" && <>
           <Card className="settings-card">
-            <CardHead title="DNS configuration" detail="Current read-only snapshot from the DNS API." />
-            {dns.isLoading ? <Loading /> : dns.error ? <ErrorState error={dns.error} /> : !dns.data?.available ? <Empty title="DNS unavailable" detail={`Capability status: ${dns.data?.status ?? "unknown"}`} /> : <>
-              {dns.data.stale && <Badge tone="warning">Last-good snapshot</Badge>}
-              <Detail label="MagicDNS" value={String(dns.data.magic_dns ?? "not reported")} />
-              <Detail label="Override local DNS" value={String(dns.data.override_local_dns ?? "not reported")} />
-              <Detail label="Nameservers" value={dns.data.nameservers?.join(", ") || "None reported"} />
-              <Detail label="Search paths" value={dns.data.search_paths?.join(", ") || "None reported"} />
-            </>}
+            <CardHead title="DNS configuration" detail="Preferences, resolvers, search domains, split DNS, and provenance." />
+            <p className="settings-link-copy">The full read-only DNS inventory now has a dedicated administrator page.</p>
+            <Link className="button secondary" to="/dns">Open DNS settings</Link>
           </Card>
           <Card className="settings-card">
             <CardHead title="Webhook inventory" detail="Credentials and query values are removed before storage and display." />

@@ -15,6 +15,7 @@ import {
   FileKey2,
   Gauge,
   GitBranch,
+  Globe2,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -38,6 +39,7 @@ import { useTimeRange } from "./timeRange";
 import {
   Dashboard,
   Devices,
+  DnsSettings,
   Flows,
   InventoryPage,
   Policy,
@@ -66,6 +68,7 @@ const nav = [
   ["Policy", "/policy", FileKey2],
   ["Audit", "/audit", Shield],
   ["Sync jobs", "/sync", RefreshCw],
+  ["DNS", "/dns", Globe2],
   ["Settings", "/settings", Settings],
 ] as const;
 
@@ -251,6 +254,10 @@ export function Shell({
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { range, setRange } = useTimeRange();
+  const visibleNav =
+    user.role === "administrator"
+      ? nav
+      : nav.filter(([label]) => label !== "DNS");
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     localStorage.theme = dark ? "dark" : "light";
@@ -289,7 +296,7 @@ export function Shell({
           </button>
         </div>
         <nav aria-label="Primary">
-          {nav.map(([label, path, Icon]) => (
+          {visibleNav.map(([label, path, Icon]) => (
             <button
               key={path}
               className={location.pathname === path ? "active" : ""}
@@ -368,7 +375,7 @@ export function Shell({
             </button>
           </div>
         </header>
-        <CommandPalette />
+        <CommandPalette items={visibleNav} />
         <main className="content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
@@ -388,6 +395,16 @@ export function Shell({
             <Route path="/policy" element={<Policy />} />
             <Route path="/audit" element={<InventoryPage kind="audit" />} />
             <Route path="/sync" element={<InventoryPage kind="sync" />} />
+            <Route
+              path="/dns"
+              element={
+                user.role === "administrator" ? (
+                  <DnsSettings />
+                ) : (
+                  <Navigate to="/" replace />
+                )
+              }
+            />
             <Route path="/settings" element={<SettingsPage user={user} />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
@@ -396,7 +413,11 @@ export function Shell({
     </div>
   );
 }
-function CommandPalette() {
+function CommandPalette({
+  items,
+}: {
+  items: ReadonlyArray<(typeof nav)[number]>;
+}) {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   useEffect(() => {
@@ -423,7 +444,7 @@ function CommandPalette() {
           <Search />
           <input autoFocus placeholder="Jump to a page…" />
         </div>
-        {nav.map(([label, path, Icon]) => (
+        {items.map(([label, path, Icon]) => (
           <button
             key={path}
             onClick={() => {

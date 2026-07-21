@@ -1750,6 +1750,86 @@ td small {
   font-size: 9px;
   margin: 3px 0;
 }
+.settings-link-copy,
+.dns-provenance p {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.dns-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px;
+}
+.dns-grid .full {
+  grid-column: 1 / -1;
+}
+.dns-provenance {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(360px, 1.4fr);
+  gap: 24px;
+  align-items: start;
+}
+.dns-provenance > div:last-child {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 24px;
+}
+.dns-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 12px;
+}
+.dns-chip-list code,
+.dns-list-item {
+  border: 1px solid var(--border);
+  background: var(--surface-soft);
+  border-radius: 8px;
+}
+.dns-chip-list code {
+  padding: 8px 10px;
+}
+.dns-list,
+.dns-config-rows {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+.dns-list-item {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  align-items: start;
+  gap: 10px;
+  padding: 11px;
+}
+.dns-list-item > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+.dns-config-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.35fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+.dns-config-row strong {
+  font-size: 10px;
+  text-transform: capitalize;
+}
+.dns-config-row code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.dns-config-row > .dns-config-rows {
+  padding-top: 0;
+}
+.dns-endpoints code {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 .dialog-backdrop {
   position: fixed;
   inset: 0;
@@ -1958,5 +2038,22 @@ td small {
   }
   .metric-card > strong {
     font-size: 22px;
+  }
+  .dns-grid,
+  .dns-provenance,
+  .dns-provenance > div:last-child {
+    grid-template-columns: 1fr;
+  }
+  .dns-config-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .dns-endpoints .setting-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .dns-endpoints code {
+    text-align: left;
   }
 }

@@ -13,13 +13,15 @@ Validated against official documentation on **2026-07-21**. The official API/Ope
 | Policy validation/preview | `POST .../acl/validate`, `POST .../acl/preview` | `policy_file:read` | Diagnostics | Optional cross-check, never policy mutation |
 | Network logs | `GET .../logging/network?start=&end=` | `logs:network:read` | 1 min | Overlapping inclusive windows and deterministic dedupe |
 | Configuration logs | `GET .../logging/configuration?start=&end=` | `logs:configuration:read` | 5 min | Separate audit-event storage |
-| DNS configuration | `GET .../dns/preferences`, `/nameservers`, `/searchpaths`, `/split-dns` | `dns:read` | 5 min | Administrator-only normalized current snapshot |
+| DNS configuration | `GET .../dns/preferences`, `/nameservers`, `/searchpaths`, `/split-dns` | `dns:read` | 5 min | Administrator-only DNS page with preferences, resolvers, search domains, split-DNS routing, freshness, and provenance |
 | Services | Official Services list/get/host/approval-status read methods | `all:read` (no granular Services scope is documented) | 5 min | First-class inventory when the endpoint is available; policy-only state otherwise |
 | Webhooks | `GET /api/v2/tailnet/{tailnet}/webhooks` | `webhooks:read` | 5 min | Administrator-only inventory with credentials and query values removed |
 
 Network logs have no pagination or maximum page size. Requests therefore use bounded inclusive RFC3339 windows, overlap recent time to capture delays, and deduplicate exact records. They are available upstream for 30 days, require eligible plans, and are client-reported. Configuration logs similarly use inclusive time windows without pagination and are retained upstream for 90 days.
 
 Capability status values are `available`, `permission_denied`, `feature_disabled`, `plan_unavailable`, `unsupported`, `upstream_error`, and `unknown`. TailView uses a precise value only when the upstream response supports it.
+
+The DNS endpoints expose tailnet configuration, not DNS activity. TailView cannot obtain DNS queries, answers, URLs, or per-device resolver state from this management API and does not infer them from flow records.
 
 ## Device address provenance
 

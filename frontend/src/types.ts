@@ -169,3 +169,20 @@ export interface FlowDeviceTraffic {
   reported_packets: number;
   record_count: number;
 }
+
+export interface DnsConfiguration {
+  available: boolean;
+  stale: boolean;
+  status: string;
+  source: string;
+  required_scope: string;
+  detail: string;
+  checked_at: string | null;
+  last_success: string | null;
+  synced_at?: string | null;
+  magic_dns?: boolean | null;
+  override_local_dns?: boolean | null;
+  nameservers?: unknown[];
+  search_paths?: string[];
+  split_dns?: Record<string, unknown>;
+}

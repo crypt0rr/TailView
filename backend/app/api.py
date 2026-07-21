@@ -1491,11 +1491,18 @@ async def run_sync(
 async def dns_settings(_: Admin, db: Db) -> dict[str, Any]:
     row = await db.get(DnsConfiguration, "current")
     capability = await db.get(Capability, "dns")
+    capability_fields = {
+        "status": capability.status if capability else "unknown",
+        "source": capability.source if capability else "Tailscale DNS API",
+        "required_scope": capability.requirement if capability else "dns:read",
+        "detail": capability.detail if capability else "",
+        "checked_at": capability.checked_at if capability else None,
+        "last_success": capability.last_success if capability else None,
+    }
     if row is None:
-        return {"available": False, "status": capability.status if capability else "unknown"}
+        return {"available": False, "stale": False, **capability_fields}
     return {
         "available": True,
-        "status": capability.status if capability else "unknown",
         "stale": bool(capability and capability.status != "available"),
         "magic_dns": row.magic_dns,
         "override_local_dns": row.override_local_dns,
@@ -1503,6 +1510,7 @@ async def dns_settings(_: Admin, db: Db) -> dict[str, Any]:
         "search_paths": row.search_paths,
         "split_dns": row.split_dns,
         "synced_at": row.synced_at,
+        **capability_fields,
     }
 
 

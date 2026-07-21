@@ -13,6 +13,7 @@ TailView is a self-hosted, read-only observability dashboard for a Tailscale tai
 - Real PostgreSQL-backed traffic time series, shared 1-hour/24-hour/7-day/30-day ranges, keyset pagination, and filter-matched exports.
 - Read-only HuJSON policy snapshots, normalized Grants/ACL sections, selector expansion, and explicit incomplete/unsupported results.
 - Configuration audit events, synchronization history, independent capability states, Prometheus metrics, and structured logs.
+- Administrator DNS inventory covering MagicDNS preferences, nameservers, search domains, split-DNS routing, freshness, and API provenance.
 - Isolated demo mode and an explicitly opt-in local telemetry profile.
 
 ## Quick start

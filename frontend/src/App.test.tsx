@@ -9,6 +9,7 @@ import {
   AddressInventoryView,
   DeviceTrafficRanking,
   DeviceTable,
+  dnsConfigurationEntries,
   PolicySecurityReview,
   dashboardMetricCards,
   keyExpiryState,
@@ -22,6 +23,18 @@ import type { AddressInventory, Device } from "./types";
 describe("TailView", () => {
   it("keeps the product name stable", () => {
     expect("TailView").toMatch(/TailView/);
+  });
+
+  it("keeps every reported split-DNS field visible in stable order", () => {
+    expect(
+      dnsConfigurationEntries({
+        routes: { "corp.example": ["100.64.0.53"] },
+        fallback: true,
+      }),
+    ).toEqual([
+      ["fallback", true],
+      ["routes", { "corp.example": ["100.64.0.53"] }],
+    ]);
   });
 
   it("leaves the authenticated shell after logout", async () => {
