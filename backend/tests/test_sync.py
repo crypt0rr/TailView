@@ -1,6 +1,14 @@
 from datetime import UTC, datetime
 
-from app.sync import build_address_index, classify, parse_time, redact, split_endpoint
+from app.sync import (
+    build_address_index,
+    build_user_login_index,
+    classify,
+    parse_time,
+    preferred_device_id,
+    redact,
+    split_endpoint,
+)
 
 
 def test_classification_is_multi_role_and_deterministic() -> None:
@@ -36,3 +44,11 @@ def test_address_index_matches_exact_addresses_and_omits_ambiguity() -> None:
         ]
     )
     assert index == {"100.64.0.1": "node-a", "100.64.0.2": "node-b"}
+
+
+def test_inventory_identity_mapping_uses_node_id_and_resolves_login_owner() -> None:
+    users = build_user_login_index([("user-123", "Alice@Example.com")])
+    device = {"id": "legacy-456", "nodeId": "nABC123CNTRL", "user": "alice@example.com"}
+
+    assert preferred_device_id(device) == "nABC123CNTRL"
+    assert users[str(device["user"]).casefold()] == "user-123"

@@ -114,6 +114,16 @@ def classify(device: dict[str, Any], routes: list[str]) -> tuple[list[str], str]
     return roles, roles[0]
 
 
+def preferred_device_id(device: dict[str, Any]) -> str:
+    """Return the stable node ID preferred by the Tailscale API."""
+    return str(device.get("nodeId") or device.get("id") or "")
+
+
+def build_user_login_index(users: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """Map normalized login names to their stable upstream user IDs."""
+    return {login.casefold(): user_id for user_id, login in users if login}
+
+
 async def sync_inventory() -> None:
     settings = get_settings()
     async with SessionLocal() as session:
@@ -122,6 +132,7 @@ async def sync_inventory() -> None:
         job = SyncJob(kind="inventory", status="running")
         session.add(job)
         await session.commit()
+        job_id = job.id
         client = await client_for(session, settings)
         if not client:
             job.status = "skipped"
@@ -134,6 +145,7 @@ async def sync_inventory() -> None:
         try:
             users = await client.users()
             await record_payload(session, "users", users)
+            user_logins: list[tuple[str, str]] = []
             for item in users:
                 upstream_id = str(item.get("id", item.get("userId", item.get("loginName", ""))))
                 if not upstream_id:
@@ -146,10 +158,12 @@ async def sync_inventory() -> None:
                 user.raw = redact(item)
                 user.synced_at = datetime.now(UTC)
                 session.add(user)
+                user_logins.append((upstream_id, user.login_name))
+            owner_ids = build_user_login_index(user_logins)
             devices = await client.devices()
             await record_payload(session, "devices", devices)
             for item in devices:
-                upstream_id = str(item.get("id", item.get("nodeId", "")))
+                upstream_id = preferred_device_id(item)
                 if not upstream_id:
                     continue
                 route_body: dict[str, Any] = {}
@@ -175,7 +189,8 @@ async def sync_inventory() -> None:
                 device.hostname = str(item.get("hostname", device.name.split(".")[0]))
                 device.os = str(item.get("os", "unknown"))
                 device.version = str(item.get("clientVersion", ""))
-                device.owner_id = str(item.get("user")) if item.get("user") else None
+                owner_login = str(item.get("user", "")).casefold()
+                device.owner_id = owner_ids.get(owner_login)
                 device.online = item.get("connectedToControl", item.get("online"))
                 device.authorized = item.get("authorized")
                 device.last_seen = parse_time(item.get("lastSeen"))
@@ -212,6 +227,23 @@ async def sync_inventory() -> None:
             capability.detail = f"Upstream returned HTTP {exc.status}"
             capability.checked_at = datetime.now(UTC)
             session.add(capability)
+        except Exception as exc:
+            await session.rollback()
+            persisted_job = await session.get(SyncJob, job_id)
+            if persisted_job is None:
+                persisted_job = SyncJob(id=job_id, kind="inventory", status="failed")
+                session.add(persisted_job)
+            job = persisted_job
+            job.status = "failed"
+            job.error = f"Inventory ingestion failed ({type(exc).__name__})"
+            capability = await session.get(Capability, "device_inventory") or Capability(
+                name="device_inventory", source="Tailscale device API"
+            )
+            capability.status = "upstream_error"
+            capability.detail = f"Inventory ingestion failed ({type(exc).__name__})"
+            capability.checked_at = datetime.now(UTC)
+            session.add(capability)
+            log.exception("inventory_ingestion_failed", error_type=type(exc).__name__)
         finally:
             job.finished_at = datetime.now(UTC)
             await session.commit()
