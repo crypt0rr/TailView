@@ -109,3 +109,26 @@ async def test_dns_client_collects_each_read_only_dns_resource() -> None:
     assert result["preferences"] == {"magicDNS": True}
     assert result["nameservers"] == {"dns": ["1.1.1.1"]}
     await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_webhook_client_accepts_null_as_an_empty_inventory() -> None:
+    route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/webhooks")
+    route.mock(return_value=httpx.Response(200, json={"webhooks": None}))
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert await client.webhooks() == []
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_webhook_client_rejects_an_unexpected_collection_shape() -> None:
+    route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/webhooks")
+    route.mock(return_value=httpx.Response(200, json={"webhooks": "not-a-list"}))
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    with pytest.raises(TailscaleError, match="Unexpected webhook inventory response"):
+        await client.webhooks()
+    await client.close()

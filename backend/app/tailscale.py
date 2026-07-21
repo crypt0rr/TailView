@@ -170,7 +170,16 @@ class TailscaleClient:
 
     async def webhooks(self) -> list[dict[str, Any]]:
         body = await self.get(f"/tailnet/{self.tailnet}/webhooks")
-        return list(body.get("webhooks", body.get("endpoints", [])))
+        if not isinstance(body, dict):
+            raise TailscaleError(502, "Unexpected webhook inventory response")
+        items = body.get("webhooks")
+        if items is None:
+            items = body.get("endpoints")
+        if items is None:
+            return []
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise TailscaleError(502, "Unexpected webhook inventory response")
+        return [dict(item) for item in items]
 
 
 def capability_status(error: TailscaleError) -> str:
