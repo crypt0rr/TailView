@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import json5
@@ -17,6 +20,7 @@ SUPPORTED = {
     "hosts",
     "ipsets",
     "postures",
+    "defaultSrcPosture",
     "autoApprovers",
     "tests",
     "sshTests",
@@ -29,6 +33,190 @@ class ParsedPolicy:
     snapshot_id: str
     normalized: dict[str, Any]
     unsupported: list[str]
+
+
+POSTURE_CONDITION = re.compile(
+    r"^(\S+)\s+(IS SET|NOT SET|NOT IN|IN|==|!=|<=|>=|<|>)\s*(.*?)\s*$"
+)
+
+
+def _version_parts(value: str) -> tuple[tuple[int, int | str], ...]:
+    parts: list[tuple[int, int | str]] = []
+    for part in re.findall(r"\d+|[^\d]+", value.casefold()):
+        parts.append((0, int(part)) if part.isdigit() else (1, part))
+    return tuple(parts)
+
+
+def evaluate_posture_condition(
+    condition: str,
+    attributes: dict[str, Any],
+    *,
+    data_available: bool,
+) -> dict[str, Any]:
+    match = POSTURE_CONDITION.fullmatch(condition.strip())
+    if not match:
+        return {"condition": condition, "status": "unsupported_condition", "actual": None}
+    key, operator, raw_expected = match.groups()
+    if not data_available:
+        return {"condition": condition, "key": key, "status": "incomplete_data", "actual": None}
+    is_set = key in attributes
+    actual = attributes.get(key)
+    if operator == "IS SET":
+        return {
+            "condition": condition,
+            "key": key,
+            "status": "pass" if is_set else "fail",
+            "actual": actual,
+        }
+    if operator == "NOT SET":
+        return {
+            "condition": condition,
+            "key": key,
+            "status": "pass" if not is_set else "fail",
+            "actual": actual,
+        }
+    if not is_set:
+        return {"condition": condition, "key": key, "status": "fail", "actual": None}
+    try:
+        expected = json5.loads(raw_expected)
+    except ValueError:
+        return {
+            "condition": condition,
+            "key": key,
+            "status": "unsupported_condition",
+            "actual": actual,
+        }
+    passed: bool
+    if operator in {"IN", "NOT IN"}:
+        if not isinstance(expected, list):
+            return {
+                "condition": condition,
+                "key": key,
+                "status": "unsupported_condition",
+                "actual": actual,
+            }
+        if key == "ip:publicAddress":
+            try:
+                address = ipaddress.ip_address(str(actual))
+                passed = any(
+                    address in ipaddress.ip_network(str(value), strict=False)
+                    for value in expected
+                )
+            except ValueError:
+                return {
+                    "condition": condition,
+                    "key": key,
+                    "status": "unsupported_condition",
+                    "actual": actual,
+                }
+        else:
+            passed = actual in expected
+        if operator == "NOT IN":
+            passed = not passed
+    elif operator in {"==", "!="}:
+        passed = actual == expected
+        if operator == "!=":
+            passed = not passed
+    elif operator in {"<", "<=", ">=", ">"}:
+        try:
+            if key in {"node:osVersion", "node:tsVersion"}:
+                left: Any = _version_parts(str(actual))
+                right: Any = _version_parts(str(expected))
+            elif (
+                isinstance(actual, int | float)
+                and not isinstance(actual, bool)
+                and isinstance(expected, int | float)
+                and not isinstance(expected, bool)
+            ):
+                left, right = actual, expected
+            else:
+                raise TypeError
+            passed = {
+                "<": left < right,
+                "<=": left <= right,
+                ">=": left >= right,
+                ">": left > right,
+            }[operator]
+        except (TypeError, ValueError):
+            return {
+                "condition": condition,
+                "key": key,
+                "status": "unsupported_condition",
+                "actual": actual,
+                "expected": expected,
+            }
+    else:
+        return {
+            "condition": condition,
+            "key": key,
+            "status": "unsupported_condition",
+            "actual": actual,
+        }
+    return {
+        "condition": condition,
+        "key": key,
+        "operator": operator,
+        "expected": expected,
+        "actual": actual,
+        "status": "pass" if passed else "fail",
+    }
+
+
+def evaluate_device_postures(
+    policy: dict[str, Any],
+    attributes: dict[str, Any],
+    expiries: dict[str, datetime | None],
+    *,
+    data_available: bool,
+    applicable: bool = True,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    evaluated_at = now or datetime.now(UTC)
+    usable: dict[str, Any] = {}
+    for key, value in attributes.items():
+        expiry = expiries.get(key)
+        if expiry is not None and expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=UTC)
+        if expiry is None or expiry > evaluated_at:
+            usable[key] = value
+    results: list[dict[str, Any]] = []
+    postures = policy.get("postures", {})
+    if not isinstance(postures, dict):
+        return results
+    for name, raw_conditions in postures.items():
+        conditions = raw_conditions if isinstance(raw_conditions, list) else []
+        assertions = [
+            evaluate_posture_condition(str(condition), usable, data_available=data_available)
+            for condition in conditions
+        ]
+        if not applicable:
+            status = "not_applicable"
+        elif not data_available:
+            status = "incomplete_data"
+        elif not isinstance(raw_conditions, list) or any(
+            assertion["status"] == "unsupported_condition" for assertion in assertions
+        ):
+            status = "unsupported_condition"
+        elif all(assertion["status"] == "pass" for assertion in assertions):
+            status = "pass"
+        else:
+            status = "fail"
+        results.append(
+            {
+                "name": str(name),
+                "status": status,
+                "assertions": assertions,
+            }
+        )
+    return results
+
+
+def required_postures_for_rule(policy: dict[str, Any], rule: dict[str, Any]) -> list[str]:
+    explicit = rule.get("srcPosture")
+    if isinstance(explicit, list):
+        return [str(value) for value in explicit]
+    default = policy.get("defaultSrcPosture", [])
+    return [str(value) for value in default] if isinstance(default, list) else []
 
 
 def parse_policy(source: str) -> ParsedPolicy:

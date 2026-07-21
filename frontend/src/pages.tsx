@@ -72,6 +72,7 @@ import type {
   Page,
   ServiceDetail,
   ServiceSummary,
+  SecurityPostureSummary,
   TopologyData,
 } from "./types";
 
@@ -309,6 +310,170 @@ export function trafficVolumeLabel(value: number) {
   return `${Math.round(value)} MB`;
 }
 
+export function SecurityPosture() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [resultFilter, setResultFilter] = useState(searchParams.get("result") ?? "");
+  const [attributeFilter, setAttributeFilter] = useState(searchParams.get("attribute") ?? "");
+  const [postureNameFilter, setPostureNameFilter] = useState(searchParams.get("posture") ?? "");
+  const [ownerFilter, setOwnerFilter] = useState(searchParams.get("owner") ?? "");
+  const [osFilter, setOsFilter] = useState(searchParams.get("os") ?? "");
+  const [expiryFilter, setExpiryFilter] = useState(searchParams.get("expiry") ?? "");
+  const [staleFilter, setStaleFilter] = useState(searchParams.get("stale") ?? "");
+  const updateFilter = (key: string, value: string) => {
+    if (key === "result") setResultFilter(value);
+    if (key === "attribute") setAttributeFilter(value);
+    if (key === "posture") setPostureNameFilter(value);
+    if (key === "owner") setOwnerFilter(value);
+    if (key === "os") setOsFilter(value);
+    if (key === "expiry") setExpiryFilter(value);
+    if (key === "stale") setStaleFilter(value);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (value) next.set(key, value);
+      else next.delete(key);
+      return next;
+    });
+  };
+  const summary = useQuery({
+    queryKey: ["security-posture"],
+    queryFn: () => request<SecurityPostureSummary>("/security/posture"),
+  });
+  const integrations = useQuery({
+    queryKey: ["security-posture-integrations"],
+    queryFn: () => request<{ items: Array<{ id: string; name: string; provider: string; status: string; synced_at: string }>; capability_status: string }>("/security/posture/integrations"),
+  });
+  const settings = useQuery({
+    queryKey: ["security-settings"],
+    queryFn: () => request<{ available: boolean; values: Record<string, unknown>; synced_at: string | null; capability_status: string }>("/security/settings"),
+  });
+  const deviceParams = new URLSearchParams();
+  if (resultFilter) deviceParams.set("result", resultFilter);
+  if (attributeFilter) deviceParams.set("attribute", attributeFilter);
+  if (postureNameFilter) deviceParams.set("posture", postureNameFilter);
+  if (ownerFilter) deviceParams.set("owner", ownerFilter);
+  if (osFilter) deviceParams.set("os", osFilter);
+  if (expiryFilter) deviceParams.set("expiry", expiryFilter);
+  if (staleFilter) deviceParams.set("stale", staleFilter);
+  const devices = useInfiniteQuery({
+    queryKey: ["security-posture-devices", resultFilter, attributeFilter, postureNameFilter, ownerFilter, osFilter, expiryFilter, staleFilter],
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams(deviceParams);
+      if (pageParam) params.set("cursor", pageParam);
+      return request<Page<Device>>(`/security/posture/devices?${params}`);
+    },
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+  });
+  if (summary.isLoading) return <Loading />;
+  if (summary.error) return <ErrorState error={summary.error} />;
+  const data = summary.data!;
+  const rows = devices.data?.pages.flatMap((page) => page.items) ?? [];
+  const metrics = [
+    ["Passing", data.counts.pass],
+    ["Failing", data.counts.fail],
+    ["Incomplete", data.counts.incomplete],
+    ["Stale", data.counts.stale],
+    ["Pending approval", data.counts.pending_approval],
+    ["Expiring attributes", data.counts.expiring_attributes],
+  ];
+  return (
+    <div className="page">
+      <PageHead
+        eyebrow="SECURITY"
+        title="Security posture"
+        description="Current policy evaluated against typed, device-reported posture evidence."
+        actions={<Badge tone={data.capability.status === "available" ? "success" : "warning"}>{data.capability.status.replaceAll("_", " ")}</Badge>}
+      />
+      <div className="posture-metrics">
+        {metrics.map(([label, value]) => (
+          <Card className="posture-metric" key={String(label)}>
+            <span>{label}</span><strong>{value}</strong>
+          </Card>
+        ))}
+      </div>
+      <div className="notice-bar warning">
+        <AlertTriangle />
+        <span>{data.limitations.join(" ")}</span>
+      </div>
+      <div className="dashboard-grid posture-overview-grid">
+        <Card className="chart-card">
+          <CardHead title="Evidence coverage" detail={`${data.coverage.devices_with_fresh_evidence} of ${data.counts.devices} devices`} />
+          <strong className="coverage-number">{data.coverage.percent}%</strong>
+          <div className="coverage-bar"><i style={{ width: `${data.coverage.percent}%` }} /></div>
+        </Card>
+        <Card className="chart-card">
+          <CardHead title="Attribute coverage" detail="Devices reporting each typed attribute" />
+          <div className="compact-list">
+            {data.attribute_coverage.slice(0, 8).map((item) => (
+              <div key={item.key}><code>{item.key}</code><span>{item.device_count} · {item.percent}%</span></div>
+            ))}
+            {!data.attribute_coverage.length && <p className="muted">No posture attributes synchronized.</p>}
+          </div>
+        </Card>
+        <Card className="chart-card">
+          <CardHead title="Tailnet security settings" detail={settings.data?.synced_at ? `Synchronized ${relativeTime(settings.data.synced_at)}` : "Not synchronized"} />
+          <div className="compact-list">
+            {Object.entries(settings.data?.values ?? {}).map(([key, value]) => <div key={key}><code>{key}</code><strong>{String(value)}</strong></div>)}
+            {!settings.data?.available && <p className="muted">Unavailable · {settings.data?.capability_status ?? "loading"}</p>}
+          </div>
+        </Card>
+        <Card className="chart-card">
+          <CardHead title="Posture integrations" detail={`Capability: ${integrations.data?.capability_status ?? "loading"}`} />
+          <div className="compact-list">
+            {integrations.data?.items.map((item) => <div key={item.id}><span><strong>{item.name}</strong><small className="block">{item.provider}</small></span><Badge>{item.status}</Badge></div>)}
+            {integrations.data && !integrations.data.items.length && <p className="muted">No integrations reported.</p>}
+          </div>
+        </Card>
+      </div>
+      <Card className="table-card posture-findings">
+        <CardHead title="Conservative findings" detail="Review signals, not vulnerability claims" />
+        {data.findings.length ? (
+          <div className="compact-list">
+            {data.findings.slice(0, 20).map((finding, index) => (
+              <Link to={`/devices?device=${encodeURIComponent(finding.device_id)}`} key={`${finding.kind}-${finding.device_id}-${index}`}>
+                <Badge tone={finding.severity === "high" ? "danger" : "warning"}>{finding.severity}</Badge>
+                <strong>{finding.device}</strong><span>{finding.message}</span>
+              </Link>
+            ))}
+          </div>
+        ) : <Empty title="No findings" detail="No conservative findings were produced from current evidence." />}
+      </Card>
+      <div className="toolbar inventory-toolbar">
+        <select aria-label="Posture result filter" value={resultFilter} onChange={(event) => updateFilter("result", event.target.value)}>
+          <option value="">All posture results</option>
+          <option value="pass">Passing</option>
+          <option value="fail">Failing</option>
+          <option value="incomplete_data">Incomplete evidence</option>
+          <option value="not_applicable">Not applicable</option>
+        </select>
+        <input aria-label="Posture attribute filter" placeholder="Filter attribute…" value={attributeFilter} onChange={(event) => updateFilter("attribute", event.target.value)} />
+        <input aria-label="Posture name filter" placeholder="Filter posture…" value={postureNameFilter} onChange={(event) => updateFilter("posture", event.target.value)} />
+        <input aria-label="Posture owner filter" placeholder="Filter owner…" value={ownerFilter} onChange={(event) => updateFilter("owner", event.target.value)} />
+        <input aria-label="Posture OS filter" placeholder="Filter OS…" value={osFilter} onChange={(event) => updateFilter("os", event.target.value)} />
+        <select aria-label="Attribute expiry filter" value={expiryFilter} onChange={(event) => updateFilter("expiry", event.target.value)}>
+          <option value="">All attribute expiry states</option><option value="active">Active</option><option value="expiring">Expiring</option><option value="expired">Expired</option>
+        </select>
+        <select aria-label="Posture staleness filter" value={staleFilter} onChange={(event) => updateFilter("stale", event.target.value)}>
+          <option value="">Fresh and stale</option><option value="true">Stale evidence</option><option value="false">Fresh evidence</option>
+        </select>
+      </div>
+      {devices.isLoading ? <Loading /> : devices.error ? <ErrorState error={devices.error} /> : !rows.length ? (
+        <Empty title="No matching devices" detail="Adjust posture filters or check synchronization." />
+      ) : (
+        <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Device</th><th>Owner</th><th>OS</th><th>Posture</th><th>Evidence</th><th>Attributes</th></tr></thead><tbody>
+          {rows.map((device) => <tr key={device.id}><td><Link to={`/devices?device=${encodeURIComponent(device.id)}`}><strong>{device.name}</strong></Link></td><td><OwnerLink device={device} /></td><td>{device.os}</td><td><PostureBadge value={device.posture?.status ?? "incomplete_data"} /></td><td>{device.posture?.stale ? "Stale" : relativeTime(device.posture?.checked_at ?? null)}</td><td>{device.posture?.attributes.length ?? 0}</td></tr>)}
+        </tbody></table></div></Card>
+      )}
+      {devices.hasNextPage && <Button variant="secondary" onClick={() => void devices.fetchNextPage()} disabled={devices.isFetchingNextPage}>{devices.isFetchingNextPage ? "Loading…" : "Load more devices"}</Button>}
+    </div>
+  );
+}
+
+function PostureBadge({ value }: { value: string }) {
+  const tone = value === "pass" ? "success" : value === "fail" ? "danger" : value === "not_applicable" ? "neutral" : "warning";
+  return <Badge tone={tone}>{value.replaceAll("_", " ")}</Badge>;
+}
+
 export function Devices({ role = "" }: { role?: string }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedDevice = searchParams.get("device");
@@ -316,6 +481,7 @@ export function Devices({ role = "" }: { role?: string }) {
   const [statusFilter, setStatusFilter] = useState(searchParams.get("status") ?? "");
   const [owner, setOwner] = useState(searchParams.get("owner") ?? "");
   const [keyExpiryFilter, setKeyExpiryFilter] = useState(searchParams.get("key_expiry") ?? "");
+  const [postureFilter, setPostureFilter] = useState(searchParams.get("posture") ?? "");
   const [showColumns, setShowColumns] = useState(false);
   const [columns, setColumns] = useState<Record<string, boolean>>(() => {
     try {
@@ -331,10 +497,11 @@ export function Devices({ role = "" }: { role?: string }) {
     if (statusFilter) params.set("status", statusFilter);
     if (owner) params.set("owner", owner);
     if (keyExpiryFilter) params.set("key_expiry", keyExpiryFilter);
+    if (postureFilter) params.set("posture_result", postureFilter);
     return params;
-  }, [keyExpiryFilter, owner, role, search, statusFilter]);
+  }, [keyExpiryFilter, owner, postureFilter, role, search, statusFilter]);
   const query = useInfiniteQuery({
-    queryKey: ["devices", search, role, statusFilter, owner, keyExpiryFilter],
+    queryKey: ["devices", search, role, statusFilter, owner, keyExpiryFilter, postureFilter],
     queryFn: ({ pageParam }) => {
       const params = new URLSearchParams(deviceParams);
       if (pageParam) params.set("cursor", pageParam);
@@ -395,6 +562,10 @@ export function Devices({ role = "" }: { role?: string }) {
     setKeyExpiryFilter(value);
     updateParams({ key_expiry: value || null });
   };
+  const setDevicePosture = (value: string) => {
+    setPostureFilter(value);
+    updateParams({ posture: value || null });
+  };
   const toggleColumn = (column: string) => {
     const next = { ...columns, [column]: columns[column] === false };
     setColumns(next);
@@ -433,6 +604,13 @@ export function Devices({ role = "" }: { role?: string }) {
             <option value="offline">Offline</option>
             <option value="unknown">Not reported</option>
           </select>
+          <select aria-label="Device posture filter" value={postureFilter} onChange={(event) => setDevicePosture(event.target.value)}>
+            <option value="">All posture results</option>
+            <option value="pass">Passing</option>
+            <option value="fail">Failing</option>
+            <option value="incomplete_data">Incomplete evidence</option>
+            <option value="not_applicable">Not applicable</option>
+          </select>
           <select
             aria-label="Device key expiry filter"
             value={keyExpiryFilter}
@@ -458,7 +636,7 @@ export function Devices({ role = "" }: { role?: string }) {
       </div>
       {showColumns && (
         <div className="filter-panel column-picker" aria-label="Device columns">
-          {["status", "role", "owner", "os", "addresses", "key_expiry", "last_seen"].map((column) => (
+          {["status", "role", "owner", "os", "posture", "addresses", "key_expiry", "last_seen"].map((column) => (
             <label key={column}>
               <input
                 type="checkbox"
@@ -519,6 +697,7 @@ export function DeviceTable({
               {columns.role !== false && <th>Role</th>}
               {columns.owner !== false && <th>Owner</th>}
               {columns.os !== false && <th>OS / Version</th>}
+              {columns.posture !== false && <th>Posture</th>}
               {columns.addresses !== false && <th>Addresses</th>}
               {columns.key_expiry !== false && <th>Key expiry</th>}
               {columns.last_seen !== false && <th>Last seen</th>}
@@ -575,6 +754,10 @@ export function DeviceTable({
                 {columns.os !== false && <td>
                   <strong>{d.os}</strong>
                   <small className="block">{d.version || "Not reported"}</small>
+                </td>}
+                {columns.posture !== false && <td>
+                  <PostureBadge value={d.posture?.status ?? "incomplete_data"} />
+                  {d.posture?.stale && <small className="block">Stale evidence</small>}
                 </td>}
                 {columns.addresses !== false && <td>
                   <code>{d.addresses[0] ?? "—"}</code>
@@ -896,7 +1079,7 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
         </button>
       </div>
       <div className="drawer-tabs">
-        {["overview", "networking", "access", "flows", "history"].map((t) => (
+        {["overview", "networking", "posture", "access", "flows", "history"].map((t) => (
           <button
             key={t}
             className={tab === t ? "active" : ""}
@@ -921,6 +1104,9 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
                 value={`${relativeTime(d.last_seen)}${d.last_seen ? ` · ${new Date(d.last_seen).toLocaleString()}` : ""}`}
               />
               <Detail label="Source" value={d.source} />
+              <Detail label="Authorization" value={d.authorized === null ? "Not reported" : d.authorized ? "Authorized" : "Pending approval / unauthorized"} />
+              <Detail label="External/shared" value={d.inventory_details?.isExternal === undefined ? "Not reported" : d.inventory_details.isExternal ? "Yes" : "No"} />
+              <Detail label="Update available" value={d.inventory_details?.updateAvailable === undefined ? "Not reported" : d.inventory_details.updateAvailable ? "Reported available" : "No update reported"} />
             </DetailGroup>
             <AddressInventoryView
               inventory={d.address_inventory}
@@ -970,7 +1156,10 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
                 <p className="muted">No routes approved.</p>
               )}
             </DetailGroup>
+            <ConnectivityView connectivity={d.connectivity} />
           </>
+        ) : tab === "posture" ? (
+          <DevicePostureView posture={d.posture} />
         ) : tab === "access" ? (
           <AccessSummary />
         ) : tab === "flows" ? (
@@ -993,6 +1182,74 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
       </div>
       </aside>
     </>
+  );
+}
+
+function DevicePostureView({ posture }: { posture?: Device["posture"] }) {
+  if (!posture) {
+    return <Empty title="Posture not synchronized" detail="Run the posture source or check its capability state." />;
+  }
+  return (
+    <>
+      <div className={`notice-bar ${posture.stale ? "warning" : ""}`}>
+        {posture.stale ? <AlertTriangle /> : <ShieldCheck />}
+        <span>{posture.notice} Evidence checked {relativeTime(posture.checked_at)}.</span>
+      </div>
+      <DetailGroup title="Policy posture results">
+        {!posture.evaluations.length ? <p className="muted">The current policy defines no posture rules.</p> : posture.evaluations.map((evaluation) => (
+          <div className="posture-evaluation" key={evaluation.name}>
+            <div><strong>{evaluation.name}</strong><PostureBadge value={evaluation.status} /></div>
+            {evaluation.assertions.map((assertion) => (
+              <div className="assertion-row" key={assertion.condition}>
+                <code>{assertion.condition}</code>
+                <PostureBadge value={assertion.status} />
+                <small>Actual: {assertion.actual === null || assertion.actual === undefined ? "not present" : String(assertion.actual)}</small>
+              </div>
+            ))}
+            {evaluation.policy_uses.map((usage) => (
+              <small className="block" key={usage.policy_path}>{usage.policy_path} affects {usage.affected_destinations.join(", ") || "unspecified destinations"}</small>
+            ))}
+          </div>
+        ))}
+      </DetailGroup>
+      <DetailGroup title="Typed attributes">
+        {!posture.attributes.length ? <p className="muted">No attributes were reported.</p> : posture.attributes.map((attribute) => (
+          <div className="attribute-row" key={attribute.key}>
+            <span><code>{attribute.key}</code><small>{attribute.namespace} · {attribute.value_type}</small></span>
+            <span><strong>{String(attribute.value)}</strong>{attribute.expiry && <small>{attribute.expiry_state} · {new Date(attribute.expiry).toLocaleString()}</small>}</span>
+          </div>
+        ))}
+      </DetailGroup>
+      <DetailGroup title="Policy access affected">
+        {!posture.rule_impacts.length ? <p className="muted">No current access rule requires a posture.</p> : posture.rule_impacts.map((impact) => (
+          <div className="posture-evaluation" key={impact.policy_path}>
+            <div><code>{impact.policy_path}</code><PostureBadge value={impact.status} /></div>
+            <small className="block">Any of: {impact.required_postures.join(", ")}</small>
+            <small className="block">Destinations: {impact.affected_destinations.join(", ") || "not reported"}</small>
+          </div>
+        ))}
+      </DetailGroup>
+    </>
+  );
+}
+
+function ConnectivityView({ connectivity }: { connectivity?: Device["connectivity"] }) {
+  return (
+    <DetailGroup title="Device-reported connectivity">
+      {!connectivity || connectivity.status === "not_reported" ? (
+        <p className="muted">Client connectivity was not supplied by the device API.</p>
+      ) : (
+        <>
+          <div className="notice-bar warning"><AlertTriangle /><span>{connectivity.notice}</span></div>
+          <Detail label="Retrieved" value={relativeTime(connectivity.retrieved_at)} />
+          <Detail label="DERP" value={connectivity.derp || "Not reported"} />
+          <Detail label="Mapping varies by destination" value={connectivity.mapping_varies_by_dest_ip === null || connectivity.mapping_varies_by_dest_ip === undefined ? "Not reported" : connectivity.mapping_varies_by_dest_ip ? "Yes" : "No"} />
+          <div className="connectivity-values"><strong>Endpoints</strong><pre>{JSON.stringify(connectivity.endpoints ?? [], null, 2)}</pre></div>
+          <div className="connectivity-values"><strong>Latency</strong><pre>{JSON.stringify(connectivity.latency ?? {}, null, 2)}</pre></div>
+          <div className="connectivity-values"><strong>Client-supported features</strong><pre>{JSON.stringify(connectivity.client_supports ?? {}, null, 2)}</pre></div>
+        </>
+      )}
+    </DetailGroup>
   );
 }
 

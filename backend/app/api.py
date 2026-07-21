@@ -39,19 +39,31 @@ from .models import (
     Capability,
     Credential,
     Device,
+    DeviceConnectivity,
+    DevicePostureAttribute,
+    DevicePostureState,
     DnsConfiguration,
     Flow,
     LocalMetadata,
     PolicySnapshot,
+    PostureIntegration,
     ServiceEndpoint,
     ServiceHost,
     SyncJob,
+    TailnetSecuritySettings,
     TailnetService,
     TailnetUser,
     TelemetryObservation,
     WebhookEndpoint,
 )
-from .policy import evaluate_policy, review_policy, security_review_policy
+from .policy import (
+    evaluate_device_postures,
+    evaluate_policy,
+    required_postures_for_rule,
+    review_policy,
+    security_review_policy,
+    source_line,
+)
 from .schemas import CredentialRequest, LoginRequest, MetadataUpdate, SetupRequest, UserResponse
 from .security import SecretBox
 from .sync import (
@@ -60,8 +72,11 @@ from .sync import (
     sync_inventory,
     sync_logs,
     sync_policy,
+    sync_posture,
+    sync_posture_integrations,
     sync_routes,
     sync_services,
+    sync_tailnet_settings,
     sync_users,
     sync_webhooks,
 )
@@ -103,6 +118,7 @@ def device_dict(
         "roles": device.roles,
         "primary_role": device.primary_role,
         "source": device.source,
+        "inventory_details": device.inventory_details,
         "metadata": {
             "description": metadata.description,
             "function": metadata.function,
@@ -124,6 +140,181 @@ async def device_label_map(db: AsyncSession) -> dict[str, str]:
         )
     ).all()
     return {device_id: display_name or name or device_id for device_id, name, display_name in rows}
+
+
+def _posture_applicable(device: Device) -> bool:
+    """Avoid posture claims for sources whose device applicability is ambiguous."""
+    raw = device.raw or {}
+    if "subnet_router" in (device.roles or []):
+        return False
+    return not any(
+        raw.get(key)
+        for key in ("isExternal", "isShared", "shared", "sharedTo", "sharedWith")
+    )
+
+
+def _posture_overall(results: list[dict[str, Any]], state: DevicePostureState | None) -> str:
+    if state is None or state.status not in {"available", "stale"}:
+        return "incomplete_data"
+    if not results:
+        return "not_applicable"
+    statuses = {str(result["status"]) for result in results}
+    if "fail" in statuses:
+        return "fail"
+    if statuses & {"incomplete_data", "unsupported_condition"}:
+        return "incomplete_data"
+    if statuses == {"not_applicable"}:
+        return "not_applicable"
+    return "pass"
+
+
+async def _posture_payload(
+    db: AsyncSession,
+    device: Device,
+    snapshot: PolicySnapshot | None = None,
+    *,
+    preloaded_state: DevicePostureState | None = None,
+    preloaded_attributes: list[DevicePostureAttribute] | None = None,
+    preloaded: bool = False,
+) -> dict[str, Any]:
+    state = preloaded_state if preloaded else await db.get(DevicePostureState, device.id)
+    if preloaded:
+        attributes = preloaded_attributes or []
+    else:
+        attributes = list(
+            (
+                await db.scalars(
+                    select(DevicePostureAttribute)
+                    .where(
+                        DevicePostureAttribute.device_id == device.id,
+                        DevicePostureAttribute.present.is_(True),
+                    )
+                    .order_by(DevicePostureAttribute.key)
+                )
+            ).all()
+        )
+    now = datetime.now(UTC)
+    values = {attribute.key: attribute.value for attribute in attributes}
+    expiries = {attribute.key: attribute.expiry for attribute in attributes}
+    data_available = bool(state and state.status == "available")
+    results = evaluate_device_postures(
+        snapshot.normalized if snapshot else {},
+        values,
+        expiries,
+        data_available=data_available,
+        applicable=_posture_applicable(device),
+        now=now,
+    )
+    for result in results:
+        for assertion in result["assertions"]:
+            lines = (
+                source_line(snapshot.hujson, assertion["condition"])
+                if snapshot
+                else (None, None)
+            )
+            assertion["source_lines"] = {"start": lines[0], "end": lines[1]}
+    usage: dict[str, list[dict[str, Any]]] = {}
+    if snapshot:
+        for section in ("grants", "acls"):
+            rules = snapshot.normalized.get(section, [])
+            if not isinstance(rules, list):
+                continue
+            for index, rule in enumerate(rules):
+                if not isinstance(rule, dict):
+                    continue
+                required = required_postures_for_rule(snapshot.normalized, rule)
+                destinations = rule.get("dst", rule.get("ports", []))
+                for posture_name in required:
+                    usage.setdefault(posture_name, []).append(
+                        {
+                            "policy_path": f'$["{section}"][{index}]',
+                            "source_lines": {
+                                "start": source_line(snapshot.hujson, posture_name)[0],
+                                "end": source_line(snapshot.hujson, posture_name)[1],
+                            },
+                            "affected_destinations": destinations
+                            if isinstance(destinations, list)
+                            else [],
+                        }
+                    )
+    for result in results:
+        result["policy_uses"] = usage.get(result["name"], [])
+
+    rule_impacts: list[dict[str, Any]] = []
+    result_by_name = {result["name"]: result["status"] for result in results}
+    if snapshot:
+        for section in ("grants", "acls"):
+            rules = snapshot.normalized.get(section, [])
+            if not isinstance(rules, list):
+                continue
+            for index, rule in enumerate(rules):
+                if not isinstance(rule, dict):
+                    continue
+                required = required_postures_for_rule(snapshot.normalized, rule)
+                if not required:
+                    continue
+                statuses = [result_by_name.get(name, "unsupported_condition") for name in required]
+                if not _posture_applicable(device):
+                    status_value = "not_applicable"
+                elif "pass" in statuses:
+                    status_value = "pass"
+                elif any(
+                    status in {"incomplete_data", "unsupported_condition"}
+                    for status in statuses
+                ):
+                    status_value = "incomplete_data"
+                else:
+                    status_value = "fail"
+                destinations = rule.get("dst", rule.get("ports", []))
+                rule_impacts.append(
+                    {
+                        "policy_path": f'$["{section}"][{index}]',
+                        "status": status_value,
+                        "required_postures": required,
+                        "semantics": "any_required_posture_may_pass",
+                        "affected_destinations": destinations
+                        if isinstance(destinations, list)
+                        else [],
+                    }
+                )
+
+    attribute_items = []
+    for attribute in attributes:
+        expiry = attribute.expiry
+        if expiry and expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=UTC)
+        if expiry and expiry <= now:
+            expiry_state = "expired"
+        elif expiry and expiry <= now + timedelta(days=7):
+            expiry_state = "expiring"
+        else:
+            expiry_state = "active"
+        attribute_items.append(
+            {
+                "key": attribute.key,
+                "namespace": attribute.namespace,
+                "value": attribute.value,
+                "value_type": attribute.value_type,
+                "expiry": expiry,
+                "expiry_state": expiry_state,
+                "synced_at": attribute.synced_at,
+                "provenance": "tailscale_device_posture_attributes_api",
+            }
+        )
+    return {
+        "status": _posture_overall(results, state),
+        "evidence_status": state.status if state else "unknown",
+        "stale": bool(state and state.status == "stale"),
+        "checked_at": state.checked_at if state else None,
+        "last_success": state.last_success if state else None,
+        "attributes": attribute_items,
+        "evaluations": results,
+        "rule_impacts": rule_impacts,
+        "notice": (
+            "Posture is evaluated against the current policy and current device evidence. "
+            "It does not describe posture at the time of historical flows."
+        ),
+    }
 
 
 async def service_address_map(db: AsyncSession) -> dict[str, tuple[str, str]]:
@@ -371,7 +562,32 @@ async def devices(
     status_filter: str = Query("", alias="status"),
     owner: str = "",
     key_expiry: str = "",
+    posture_result: str = "",
 ) -> dict[str, Any]:
+    if posture_result:
+        if posture_result not in {"pass", "fail", "incomplete_data", "not_applicable"}:
+            raise HTTPException(422, "Unsupported posture result filter")
+        items = [
+            item
+            for item in await _security_device_rows(db)
+            if item["posture"]["status"] == posture_result
+        ]
+        cursor_data = decode_cursor(cursor, "devices")
+        if cursor_data:
+            key = (str(cursor_data.get("name", "")), str(cursor_data.get("id", "")))
+            items = [
+                item
+                for item in items
+                if (str(item["name"]).casefold(), str(item["id"])) > key
+            ]
+        page = items[:limit]
+        next_cursor = None
+        if len(items) > limit and page:
+            last = page[-1]
+            next_cursor = encode_cursor(
+                "devices", {"name": str(last["name"]).casefold(), "id": last["id"]}
+            )
+        return {"items": page, "next_cursor": next_cursor}
     cursor_data = decode_cursor(cursor, "devices")
     query, sort_key = _device_query(search, role, status_filter, owner, key_expiry)
     if cursor_data:
@@ -389,10 +605,18 @@ async def devices(
     if len(rows) > limit and page_rows:
         last_device, _, _, last_sort_key = page_rows[-1]
         next_cursor = encode_cursor("devices", {"name": str(last_sort_key), "id": last_device.id})
-    return {
-        "items": [device_dict(d, m, item_owner) for d, m, item_owner, _ in page_rows],
-        "next_cursor": next_cursor,
-    }
+    items = []
+    snapshot = await db.scalar(
+        select(PolicySnapshot)
+        .where(PolicySnapshot.valid.is_(True))
+        .order_by(PolicySnapshot.retrieved_at.desc())
+        .limit(1)
+    )
+    for current_device, metadata, item_owner, _ in page_rows:
+        item = device_dict(current_device, metadata, item_owner)
+        item["posture"] = await _posture_payload(db, current_device, snapshot)
+        items.append(item)
+    return {"items": items, "next_cursor": next_cursor}
 
 
 @router.get("/devices/export.csv")
@@ -593,6 +817,37 @@ async def device(
             "authoritative device interface addresses."
         ),
     }
+    snapshot = await db.scalar(
+        select(PolicySnapshot)
+        .where(PolicySnapshot.valid.is_(True))
+        .order_by(PolicySnapshot.retrieved_at.desc())
+        .limit(1)
+    )
+    item["posture"] = await _posture_payload(db, row[0], snapshot)
+    connectivity = await db.get(DeviceConnectivity, device_id)
+    item["connectivity"] = (
+        {
+            "status": "available",
+            "mapping_varies_by_dest_ip": connectivity.mapping_varies_by_dest_ip,
+            "derp": connectivity.derp,
+            "endpoints": connectivity.endpoints,
+            "latency": connectivity.latency,
+            "client_supports": connectivity.client_supports,
+            "retrieved_at": connectivity.retrieved_at,
+            "provenance": "tailscale_device_api_client_connectivity",
+            "notice": (
+                "Device-reported API snapshot. Endpoints, DERP selection, and latency are "
+                "delayed point-in-time reports, not live or tailnet-wide measurements."
+            ),
+        }
+        if connectivity
+        else {
+            "status": "not_reported",
+            "retrieved_at": None,
+            "provenance": "tailscale_device_api_client_connectivity",
+            "notice": "Client connectivity was not supplied by the device API.",
+        }
+    )
     return item
 
 
@@ -1457,6 +1712,281 @@ async def sync_jobs(_: Authed, db: Db) -> dict[str, Any]:
     }
 
 
+async def _security_device_rows(db: AsyncSession) -> list[dict[str, Any]]:
+    snapshot = await db.scalar(
+        select(PolicySnapshot)
+        .where(PolicySnapshot.valid.is_(True))
+        .order_by(PolicySnapshot.retrieved_at.desc())
+        .limit(1)
+    )
+    rows = (
+        await db.execute(
+            select(Device, LocalMetadata, TailnetUser)
+            .outerjoin(LocalMetadata)
+            .outerjoin(TailnetUser, Device.owner_id == TailnetUser.id)
+            .where(Device.active.is_(True))
+            .order_by(func.lower(func.coalesce(LocalMetadata.display_name, Device.name)), Device.id)
+        )
+    ).all()
+    states = {
+        state.device_id: state
+        for state in (await db.scalars(select(DevicePostureState))).all()
+    }
+    attribute_rows = (
+        await db.scalars(
+            select(DevicePostureAttribute)
+            .where(DevicePostureAttribute.present.is_(True))
+            .order_by(DevicePostureAttribute.device_id, DevicePostureAttribute.key)
+        )
+    ).all()
+    attributes_by_device: dict[str, list[DevicePostureAttribute]] = {}
+    for attribute_row in attribute_rows:
+        attributes_by_device.setdefault(attribute_row.device_id, []).append(attribute_row)
+    result = []
+    for current_device, metadata, owner in rows:
+        item = device_dict(current_device, metadata, owner)
+        item["posture"] = await _posture_payload(
+            db,
+            current_device,
+            snapshot,
+            preloaded_state=states.get(current_device.id),
+            preloaded_attributes=attributes_by_device.get(current_device.id, []),
+            preloaded=True,
+        )
+        result.append(item)
+    return result
+
+
+@router.get("/security/posture")
+async def security_posture(_: Authed, db: Db) -> dict[str, Any]:
+    devices = await _security_device_rows(db)
+    capability = await db.get(Capability, "device_posture")
+    counts = {
+        "pass": 0,
+        "fail": 0,
+        "incomplete": 0,
+        "stale": 0,
+        "pending_approval": 0,
+        "expiring_attributes": 0,
+    }
+    namespace_counts: dict[str, int] = {}
+    attribute_counts: dict[str, int] = {}
+    auto_update: dict[str, int] = {}
+    release_tracks: dict[str, int] = {}
+    findings: list[dict[str, Any]] = []
+    for item in devices:
+        posture = item["posture"]
+        status_value = posture["status"]
+        if status_value in {"pass", "fail"}:
+            counts[status_value] += 1
+        elif status_value == "incomplete_data":
+            counts["incomplete"] += 1
+        if posture["stale"]:
+            counts["stale"] += 1
+            findings.append(
+                {
+                    "severity": "medium",
+                    "kind": "stale_evidence",
+                    "device_id": item["id"],
+                    "device": item["name"],
+                    "message": (
+                        "Last-good posture evidence is stale; no pass/fail conclusion is made."
+                    ),
+                }
+            )
+        if item["authorized"] is False:
+            counts["pending_approval"] += 1
+            findings.append(
+                {
+                    "severity": "high",
+                    "kind": "unauthorized_device",
+                    "device_id": item["id"],
+                    "device": item["name"],
+                    "message": "The device API reports this device as not authorized.",
+                }
+            )
+        for attribute in posture["attributes"]:
+            key = str(attribute["key"])
+            namespace = str(attribute["namespace"])
+            attribute_counts[key] = attribute_counts.get(key, 0) + 1
+            namespace_counts[namespace] = namespace_counts.get(namespace, 0) + 1
+            if attribute["expiry_state"] == "expiring":
+                counts["expiring_attributes"] += 1
+                findings.append(
+                    {
+                        "severity": "medium",
+                        "kind": "expiring_attribute",
+                        "device_id": item["id"],
+                        "device": item["name"],
+                        "attribute": key,
+                        "expiry": attribute["expiry"],
+                        "message": "A temporary posture attribute expires within seven days.",
+                    }
+                )
+            if key == "node:tsAutoUpdate":
+                label = str(attribute["value"])
+                auto_update[label] = auto_update.get(label, 0) + 1
+            if key == "node:tsReleaseTrack":
+                label = str(attribute["value"])
+                release_tracks[label] = release_tracks.get(label, 0) + 1
+        if status_value == "fail":
+            findings.append(
+                {
+                    "severity": "high",
+                    "kind": "posture_failure",
+                    "device_id": item["id"],
+                    "device": item["name"],
+                    "message": "One or more current policy postures fail for this device.",
+                }
+            )
+    device_total = len(devices)
+    return {
+        "counts": {"devices": device_total, **counts},
+        "coverage": {
+            "devices_with_fresh_evidence": sum(
+                1 for item in devices if item["posture"]["evidence_status"] == "available"
+            ),
+            "percent": round(
+                100
+                * sum(
+                    1 for item in devices if item["posture"]["evidence_status"] == "available"
+                )
+                / device_total,
+                1,
+            )
+            if device_total
+            else 0,
+        },
+        "attribute_coverage": [
+            {"key": key, "device_count": count, "percent": round(count * 100 / device_total, 1)}
+            for key, count in sorted(attribute_counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        ]
+        if device_total
+        else [],
+        "namespaces": namespace_counts,
+        "auto_update": auto_update,
+        "release_tracks": release_tracks,
+        "findings": findings[:500],
+        "capability": {
+            "status": capability.status if capability else "unknown",
+            "detail": capability.detail if capability else "Not synchronized yet",
+            "last_success": capability.last_success if capability else None,
+            "required_scope": "devices:posture_attributes:read or all:read",
+        },
+        "limitations": [
+            "Posture conclusions use current policy and current device evidence only.",
+            "Shared-node and subnet-routed source applicability may be incomplete.",
+            (
+                "Fleet-relative versions are displayed without claiming they are vulnerable "
+                "or outdated."
+            ),
+        ],
+    }
+
+
+@router.get("/security/posture/devices")
+async def security_posture_devices(
+    _: Authed,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    result: str = "",
+    posture: str = "",
+    attribute: str = "",
+    owner: str = "",
+    os: str = "",
+    expiry: str = "",
+    stale: bool | None = None,
+) -> dict[str, Any]:
+    items = await _security_device_rows(db)
+    filtered = []
+    for item in items:
+        details = item["posture"]
+        attributes = details["attributes"]
+        evaluations = details["evaluations"]
+        if result and details["status"] != result:
+            continue
+        if posture and not any(
+            evaluation["name"] == posture for evaluation in evaluations
+        ):
+            continue
+        if attribute and not any(
+            attribute.casefold() in value["key"].casefold() for value in attributes
+        ):
+            continue
+        owner_text = " ".join(
+            filter(None, [item["owner_display_name"], item["owner_login_name"], item["owner_id"]])
+        )
+        if owner and owner.casefold() not in owner_text.casefold():
+            continue
+        if os and os.casefold() not in str(item["os"]).casefold():
+            continue
+        if expiry and not any(value["expiry_state"] == expiry for value in attributes):
+            continue
+        if stale is not None and details["stale"] is not stale:
+            continue
+        filtered.append(item)
+    start = 0
+    cursor_data = decode_cursor(cursor, "posture_devices")
+    if cursor_data:
+        cursor_key = (str(cursor_data.get("name", "")), str(cursor_data.get("id", "")))
+        start = next(
+            (
+                index
+                for index, item in enumerate(filtered)
+                if (str(item["name"]).casefold(), str(item["id"])) > cursor_key
+            ),
+            len(filtered),
+        )
+    page = filtered[start : start + limit]
+    next_cursor = None
+    if start + limit < len(filtered) and page:
+        last = page[-1]
+        next_cursor = encode_cursor(
+            "posture_devices", {"name": str(last["name"]).casefold(), "id": last["id"]}
+        )
+    return {"items": page, "next_cursor": next_cursor, "total": len(filtered)}
+
+
+@router.get("/security/posture/integrations")
+async def security_posture_integrations(_: Authed, db: Db) -> dict[str, Any]:
+    capability = await db.get(Capability, "posture_integrations")
+    rows = (
+        await db.scalars(
+            select(PostureIntegration)
+            .where(PostureIntegration.present.is_(True))
+            .order_by(PostureIntegration.name, PostureIntegration.id)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "name": row.name,
+                "provider": row.provider,
+                "status": row.status,
+                "synced_at": row.synced_at,
+                "provenance": "tailscale_posture_integrations_api",
+            }
+            for row in rows
+        ],
+        "capability_status": capability.status if capability else "unknown",
+    }
+
+
+@router.get("/security/settings")
+async def security_settings(_: Authed, db: Db) -> dict[str, Any]:
+    row = await db.get(TailnetSecuritySettings, "current")
+    capability = await db.get(Capability, "tailnet_settings")
+    return {
+        "available": row is not None,
+        "values": row.values if row else {},
+        "synced_at": row.synced_at if row else None,
+        "capability_status": capability.status if capability else "unknown",
+        "provenance": "tailscale_tailnet_feature_settings_api",
+    }
+
+
 @router.post("/sync/{kind}")
 async def run_sync(
     kind: str,
@@ -1476,6 +2006,9 @@ async def run_sync(
         "dns": sync_dns,
         "webhooks": sync_webhooks,
         "policy": sync_policy,
+        "posture": sync_posture,
+        "posture_integrations": sync_posture_integrations,
+        "tailnet_settings": sync_tailnet_settings,
     }
     if kind in {"flows", "audit"}:
         await sync_logs(kind)

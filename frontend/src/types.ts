@@ -23,6 +23,7 @@ export interface Device {
   roles: string[];
   primary_role: string;
   source: string;
+  inventory_details?: Record<string, unknown>;
   metadata: null | {
     description?: string;
     function?: string;
@@ -33,6 +34,101 @@ export interface Device {
     hidden: boolean;
   };
   address_inventory?: AddressInventory;
+  posture?: DevicePosture;
+  connectivity?: DeviceConnectivity;
+}
+export interface PostureAttribute {
+  key: string;
+  namespace: string;
+  value: string | number | boolean;
+  value_type: "string" | "number" | "boolean";
+  expiry: string | null;
+  expiry_state: "active" | "expiring" | "expired";
+  synced_at: string;
+  provenance: string;
+}
+export interface PostureEvaluation {
+  name: string;
+  status:
+    | "pass"
+    | "fail"
+    | "incomplete_data"
+    | "unsupported_condition"
+    | "not_applicable";
+  assertions: Array<{
+    condition: string;
+    key?: string;
+    operator?: string;
+    expected?: unknown;
+    actual: unknown;
+    status: string;
+    source_lines?: { start: number | null; end: number | null };
+  }>;
+  policy_uses: Array<{
+    policy_path: string;
+    source_lines: { start: number | null; end: number | null };
+    affected_destinations: string[];
+  }>;
+}
+export interface DevicePosture {
+  status: "pass" | "fail" | "incomplete_data" | "not_applicable";
+  evidence_status: string;
+  stale: boolean;
+  checked_at: string | null;
+  last_success: string | null;
+  attributes: PostureAttribute[];
+  evaluations: PostureEvaluation[];
+  rule_impacts: Array<{
+    policy_path: string;
+    status: string;
+    required_postures: string[];
+    semantics: "any_required_posture_may_pass";
+    affected_destinations: string[];
+  }>;
+  notice: string;
+}
+export interface DeviceConnectivity {
+  status: "available" | "not_reported";
+  mapping_varies_by_dest_ip?: boolean | null;
+  derp?: string | null;
+  endpoints?: unknown[];
+  latency?: Record<string, unknown>;
+  client_supports?: Record<string, unknown>;
+  retrieved_at: string | null;
+  provenance: string;
+  notice: string;
+}
+export interface SecurityPostureSummary {
+  counts: {
+    devices: number;
+    pass: number;
+    fail: number;
+    incomplete: number;
+    stale: number;
+    pending_approval: number;
+    expiring_attributes: number;
+  };
+  coverage: { devices_with_fresh_evidence: number; percent: number };
+  attribute_coverage: Array<{ key: string; device_count: number; percent: number }>;
+  namespaces: Record<string, number>;
+  auto_update: Record<string, number>;
+  release_tracks: Record<string, number>;
+  findings: Array<{
+    severity: string;
+    kind: string;
+    device_id: string;
+    device: string;
+    message: string;
+    attribute?: string;
+    expiry?: string;
+  }>;
+  capability: {
+    status: string;
+    detail: string;
+    last_success: string | null;
+    required_scope: string;
+  };
+  limitations: string[];
 }
 export interface TailnetAddress {
   address: string;

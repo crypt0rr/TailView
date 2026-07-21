@@ -21,13 +21,18 @@ from .models import (
     Capability,
     Credential,
     Device,
+    DeviceConnectivity,
+    DevicePostureAttribute,
+    DevicePostureState,
     DnsConfiguration,
     Flow,
     PolicySnapshot,
+    PostureIntegration,
     RawPayload,
     ServiceEndpoint,
     ServiceHost,
     SyncJob,
+    TailnetSecuritySettings,
     TailnetService,
     TailnetUser,
     WebhookEndpoint,
@@ -37,6 +42,16 @@ from .security import SecretBox
 from .tailscale import TailscaleClient, TailscaleError, capability_status
 
 log = structlog.get_logger()
+
+DEVICE_INVENTORY_DETAIL_FIELDS = {
+    "blocksIncomingConnections",
+    "isExternal",
+    "machineKey",
+    "nodeKey",
+    "tailnetLockError",
+    "tailnetLockKey",
+    "updateAvailable",
+}
 
 
 def parse_time(value: Any) -> datetime | None:
@@ -151,10 +166,13 @@ async def sync_inventory() -> None:
     for synchronize in (
         sync_users,
         sync_devices,
+        sync_posture,
         sync_routes,
         sync_services,
         sync_dns,
         sync_webhooks,
+        sync_posture_integrations,
+        sync_tailnet_settings,
     ):
         try:
             await synchronize()
@@ -350,9 +368,38 @@ async def _devices_worker(session: AsyncSession, client: TailscaleClient) -> Sou
         device.tags = list(item.get("tags") or [])
         advertised = list(item.get("advertisedRoutes") or device.advertised_routes or [])
         device.roles, device.primary_role = classify(item, advertised)
+        device.inventory_details = {
+            key: item[key] for key in DEVICE_INVENTORY_DETAIL_FIELDS if key in item
+        }
         device.raw = redact(item)
         device.synced_at = datetime.now(UTC)
         session.add(device)
+        connectivity = item.get("clientConnectivity")
+        if isinstance(connectivity, dict):
+            snapshot = await session.get(DeviceConnectivity, upstream_id) or DeviceConnectivity(
+                device_id=upstream_id
+            )
+            snapshot.mapping_varies_by_dest_ip = connectivity.get("mappingVariesByDestIP")
+            snapshot.derp = (
+                str(connectivity["derp"]) if connectivity.get("derp") is not None else None
+            )
+            snapshot.endpoints = list(connectivity.get("endpoints") or [])
+            latency = connectivity.get("latency")
+            snapshot.latency = dict(latency) if isinstance(latency, dict) else {}
+            supports = connectivity.get("clientSupports")
+            snapshot.client_supports = (
+                dict(supports)
+                if isinstance(supports, dict)
+                else {"features": list(supports)}
+                if isinstance(supports, list)
+                else {}
+            )
+            snapshot.retrieved_at = datetime.now(UTC)
+            session.add(snapshot)
+        else:
+            existing_connectivity = await session.get(DeviceConnectivity, upstream_id)
+            if existing_connectivity:
+                await session.delete(existing_connectivity)
         succeeded += 1
     return (
         len(items),
@@ -376,6 +423,191 @@ async def sync_devices() -> None:
         capability_source="Tailscale device API",
         requirement="devices:core:read",
         worker=_devices_worker,
+    )
+
+
+def _posture_value_type(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return "number"
+    return None
+
+
+async def _posture_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
+    devices = (await session.scalars(select(Device).where(Device.active.is_(True)))).all()
+    semaphore = asyncio.Semaphore(8)
+
+    async def fetch(device: Device) -> tuple[Device, dict[str, Any] | TailscaleError]:
+        async with semaphore:
+            try:
+                return device, await client.posture_attributes(device.id)
+            except TailscaleError as exc:
+                return device, exc
+
+    results = await asyncio.gather(*(fetch(device) for device in devices))
+    failures: Counter[str] = Counter()
+    unsupported_values = 0
+    succeeded = 0
+    now = datetime.now(UTC)
+    for device, result in results:
+        state = await session.get(DevicePostureState, device.id) or DevicePostureState(
+            device_id=device.id
+        )
+        state.checked_at = now
+        if isinstance(result, TailscaleError):
+            failure_status = capability_status(result)
+            failures[failure_status] += 1
+            state.status = "stale" if state.last_success else "unknown"
+            state.error_status = failure_status
+            session.add(state)
+            await session.commit()
+            continue
+        await record_payload(session, f"posture:{device.id}", result)
+        attributes = result.get("attributes", {})
+        expiries = result.get("expiries", {})
+        if not isinstance(attributes, dict):
+            attributes = {}
+        if not isinstance(expiries, dict):
+            expiries = {}
+        await session.execute(
+            update(DevicePostureAttribute)
+            .where(DevicePostureAttribute.device_id == device.id)
+            .values(present=False)
+        )
+        for key, value in attributes.items():
+            value_type = _posture_value_type(value)
+            if value_type is None:
+                unsupported_values += 1
+                continue
+            attribute_key = str(key)
+            row = await session.get(DevicePostureAttribute, (device.id, attribute_key))
+            if row is None:
+                row = DevicePostureAttribute(
+                    device_id=device.id,
+                    key=attribute_key,
+                    namespace=attribute_key.partition(":")[0] or "unknown",
+                    value=value,
+                    value_type=value_type,
+                )
+            row.namespace = attribute_key.partition(":")[0] or "unknown"
+            row.value = value
+            row.value_type = value_type
+            row.expiry = parse_time(expiries.get(attribute_key))
+            row.present = True
+            row.synced_at = now
+            session.add(row)
+        state.status = "available"
+        state.error_status = None
+        state.last_success = now
+        session.add(state)
+        await session.commit()
+        succeeded += 1
+    failed = len(devices) - succeeded
+    details = {
+        "concurrency": 8,
+        "failure_statuses": dict(failures),
+        "unsupported_attribute_values": unsupported_values,
+    }
+    if devices and succeeded == 0:
+        statuses = set(failures)
+        status_value = next(iter(statuses)) if len(statuses) == 1 else "upstream_error"
+        status_codes = {"permission_denied": 403, "unsupported": 404, "feature_disabled": 409}
+        raise SourceAllFailed(status_codes.get(status_value, 500), len(devices), details)
+    return len(devices), succeeded, failed, details
+
+
+async def sync_posture() -> None:
+    await _run_source(
+        kind="posture",
+        lock_key=81107,
+        capability_name="device_posture",
+        capability_source="Tailscale device posture attributes API",
+        requirement="devices:posture_attributes:read",
+        worker=_posture_worker,
+    )
+
+
+SECURITY_SETTING_FIELDS = {
+    "devicesApprovalOn",
+    "devicesAutoUpdatesOn",
+    "devicesKeyDurationDays",
+    "usersApprovalOn",
+    "usersRoleAllowedToJoinExternalTailnets",
+    "networkFlowLoggingOn",
+    "regionalRoutingOn",
+    "postureIdentityCollectionOn",
+}
+
+
+async def _tailnet_settings_worker(
+    session: AsyncSession, client: TailscaleClient
+) -> SourceResult:
+    item = await client.tailnet_settings()
+    await record_payload(session, "tailnet_settings", item)
+    row = await session.get(TailnetSecuritySettings, "current") or TailnetSecuritySettings(
+        id="current"
+    )
+    row.values = {key: item[key] for key in SECURITY_SETTING_FIELDS if key in item}
+    row.synced_at = datetime.now(UTC)
+    session.add(row)
+    return 1, 1, 0, {"normalized_fields": len(row.values)}
+
+
+async def sync_tailnet_settings() -> None:
+    await _run_source(
+        kind="tailnet_settings",
+        lock_key=81108,
+        capability_name="tailnet_settings",
+        capability_source="Tailscale tailnet settings API",
+        requirement="feature_settings:read; all:read recommended",
+        worker=_tailnet_settings_worker,
+    )
+
+
+async def _posture_integrations_worker(
+    session: AsyncSession, client: TailscaleClient
+) -> SourceResult:
+    items = await client.posture_integrations()
+    await session.execute(update(PostureIntegration).values(present=False))
+    failures: Counter[str] = Counter()
+    succeeded = 0
+    safe_items: list[dict[str, Any]] = []
+    for summary in items:
+        integration_id = str(summary.get("id") or summary.get("integrationId") or "")
+        if not integration_id:
+            failures["invalid_response"] += 1
+            continue
+        item = summary
+        try:
+            item = {**summary, **await client.posture_integration(integration_id)}
+        except TailscaleError as exc:
+            failures[f"detail_{capability_status(exc)}"] += 1
+        row = await session.get(PostureIntegration, integration_id) or PostureIntegration(
+            id=integration_id
+        )
+        row.name = str(item.get("name") or item.get("displayName") or integration_id)
+        row.provider = str(item.get("provider") or item.get("type") or "unknown")
+        row.status = str(item.get("status") or item.get("state") or "unknown")
+        row.present = True
+        row.synced_at = datetime.now(UTC)
+        session.add(row)
+        safe_items.append(redact(item))
+        succeeded += 1
+    await record_payload(session, "posture_integrations", safe_items)
+    return len(items), succeeded, len(items) - succeeded, {"failure_statuses": dict(failures)}
+
+
+async def sync_posture_integrations() -> None:
+    await _run_source(
+        kind="posture_integrations",
+        lock_key=81109,
+        capability_name="posture_integrations",
+        capability_source="Tailscale posture integrations API",
+        requirement="feature_settings:read",
+        worker=_posture_integrations_worker,
     )
 
 
@@ -693,9 +925,38 @@ async def sync_policy() -> None:
             await record_payload(session, "policy", parsed.normalized)
             job.status = "success"
             job.processed = 1
-        except (TailscaleError, ValueError) as exc:
+            capability = await session.get(Capability, "policy") or Capability(
+                name="policy", source="Tailscale policy API"
+            )
+            capability.status = "available"
+            capability.requirement = "policy_file:read"
+            capability.detail = "Current policy retrieved successfully"
+            capability.last_success = datetime.now(UTC)
+            capability.checked_at = datetime.now(UTC)
+            session.add(capability)
+        except TailscaleError as exc:
             job.status = "failed"
             job.error = type(exc).__name__
+            capability = await session.get(Capability, "policy") or Capability(
+                name="policy", source="Tailscale policy API"
+            )
+            capability.status = capability_status(exc)
+            capability.requirement = "policy_file:read"
+            capability.detail = "Policy retrieval is unavailable"
+            capability.checked_at = datetime.now(UTC)
+            session.add(capability)
+        except ValueError as exc:
+            job.status = "failed"
+            job.error = type(exc).__name__
+            capability = await session.get(Capability, "policy") or Capability(
+                name="policy", source="Tailscale policy API"
+            )
+            capability.status = "available"
+            capability.requirement = "policy_file:read"
+            capability.detail = "Policy retrieved, but local parsing failed"
+            capability.last_success = datetime.now(UTC)
+            capability.checked_at = datetime.now(UTC)
+            session.add(capability)
         finally:
             job.finished_at = datetime.now(UTC)
             await session.commit()
@@ -897,6 +1158,25 @@ def create_scheduler() -> AsyncIOScheduler:
             max_instances=1,
             coalesce=True,
             jitter=15,
+        )
+    scheduler.add_job(
+        sync_posture,
+        "interval",
+        seconds=settings.posture_interval_seconds,
+        id="posture",
+        max_instances=1,
+        coalesce=True,
+        jitter=15,
+    )
+    for source in (sync_posture_integrations, sync_tailnet_settings):
+        scheduler.add_job(
+            source,
+            "interval",
+            seconds=settings.security_settings_interval_seconds,
+            id=source.__name__.removeprefix("sync_"),
+            max_instances=1,
+            coalesce=True,
+            jitter=30,
         )
     scheduler.add_job(
         sync_policy,

@@ -8,6 +8,8 @@ TailView is a self-hosted, read-only observability dashboard for a Tailscale tai
 
 - One-time setup-token bootstrap, Argon2id passwords, revocable server-side sessions, administrator/viewer RBAC, login throttling, and CSRF protection.
 - Device/user inventory with multi-role classification, routes, tags, local metadata, saved-view schema, and provenance.
+- A Security posture workspace with typed device attributes, expiry/freshness coverage, current-policy evaluation, conservative findings, feature settings, and redacted integration inventory.
+- Capability-aware navigation keeps active data sources prominent and groups definitively unavailable licensed/scoped features under a collapsible **Not in use** section; transient failures and unprobed capabilities stay visible.
 - Interactive Cytoscape topology with observed and policy-permitted layers, layouts, filtering, selection, and a details drawer.
 - Flow explorer, reported-volume charts, CSV/JSON export, unresolved destinations, and virtual/subnet/exit/physical categories.
 - Real PostgreSQL-backed traffic time series, shared 1-hour/24-hour/7-day/30-day ranges, keyset pagination, and filter-matched exports.

@@ -1,7 +1,10 @@
 import json
+from datetime import UTC, datetime, timedelta
 
 from app.policy import (
+    evaluate_device_postures,
     evaluate_policy,
+    evaluate_posture_condition,
     expand_selector,
     parse_policy,
     review_policy,
@@ -26,6 +29,71 @@ def test_parse_hujson_and_source_location() -> None:
 def test_future_construct_is_explicitly_unsupported() -> None:
     parsed = parse_policy('{"futureThing": {}}')
     assert parsed.unsupported == ["futureThing"]
+
+
+def test_posture_operators_and_typed_version_comparison() -> None:
+    attributes = {
+        "node:os": "linux",
+        "node:tsVersion": "1.100.2",
+        "custom:score": 80,
+        "custom:managed": True,
+        "ip:publicAddress": "203.0.113.10",
+    }
+    passing = [
+        "node:os == 'linux'",
+        "node:os != 'windows'",
+        "node:os IN ['linux', 'macos']",
+        "node:os NOT IN ['windows']",
+        "custom:managed IS SET",
+        "custom:missing NOT SET",
+        "custom:score >= 70",
+        "node:tsVersion > '1.99.9'",
+        "ip:publicAddress IN ['203.0.113.0/24']",
+    ]
+    assert all(
+        evaluate_posture_condition(value, attributes, data_available=True)["status"] == "pass"
+        for value in passing
+    )
+    assert (
+        evaluate_posture_condition(
+            "custom:missing == true", attributes, data_available=True
+        )["status"]
+        == "fail"
+    )
+    assert (
+        evaluate_posture_condition(
+            "custom:score > 'high'", attributes, data_available=True
+        )["status"]
+        == "unsupported_condition"
+    )
+
+
+def test_posture_missing_data_expiry_and_default_precedence() -> None:
+    now = datetime(2026, 7, 21, tzinfo=UTC)
+    policy = {
+        "postures": {
+            "posture:managed": ["custom:managed == true"],
+            "posture:temporary": ["custom:temporary IS SET"],
+        },
+        "defaultSrcPosture": ["posture:managed"],
+    }
+    fresh = evaluate_device_postures(
+        policy,
+        {"custom:managed": True, "custom:temporary": True},
+        {"custom:temporary": now - timedelta(seconds=1)},
+        data_available=True,
+        now=now,
+    )
+    assert fresh[0]["status"] == "pass"
+    assert fresh[1]["status"] == "fail"
+    incomplete = evaluate_device_postures(
+        policy, {}, {}, data_available=False, now=now
+    )
+    assert {item["status"] for item in incomplete} == {"incomplete_data"}
+    not_applicable = evaluate_device_postures(
+        policy, {}, {}, data_available=True, applicable=False, now=now
+    )
+    assert {item["status"] for item in not_applicable} == {"not_applicable"}
 
 
 def test_selector_resolution_and_additive_allow() -> None:

@@ -28,12 +28,13 @@ import {
   Server,
   Settings,
   Shield,
+  ShieldCheck,
   Sun,
   Tags,
   Users,
   X,
 } from "lucide-react";
-import { api, ApiError } from "./api";
+import { api, ApiError, request } from "./api";
 import { Button, Loading } from "./components";
 import { useTimeRange } from "./timeRange";
 import {
@@ -45,6 +46,7 @@ import {
   Policy,
   SettingsPage,
   Services,
+  SecurityPosture,
   Topology,
 } from "./pages";
 
@@ -53,7 +55,7 @@ type CurrentUser = {
   username: string;
   role: "administrator" | "viewer";
 };
-const nav = [
+export const nav = [
   ["Dashboard", "/", LayoutDashboard],
   ["Topology", "/topology", Network],
   ["Flows", "/flows", Activity],
@@ -66,11 +68,62 @@ const nav = [
   ["Subnet routers", "/subnet-routers", Network],
   ["Tags", "/tags", Tags],
   ["Policy", "/policy", FileKey2],
+  ["Security posture", "/security/posture", ShieldCheck],
   ["Audit", "/audit", Shield],
   ["Sync jobs", "/sync", RefreshCw],
   ["DNS", "/dns", Globe2],
   ["Settings", "/settings", Settings],
 ] as const;
+
+type CapabilityResult = {
+  name: string;
+  status: string;
+  requirement: string;
+  detail: string;
+  last_success: string | null;
+};
+
+const navigationCapabilities: Record<string, string> = {
+  "/flows": "network_flow_logs",
+  "/devices": "device_inventory",
+  "/users": "user_inventory",
+  "/groups": "policy",
+  "/routes": "routes",
+  "/services": "services",
+  "/exit-nodes": "routes",
+  "/subnet-routers": "routes",
+  "/tags": "policy",
+  "/policy": "policy",
+  "/security/posture": "device_posture",
+  "/audit": "configuration_audit_logs",
+  "/dns": "dns",
+};
+
+const unavailableCapabilityStates = new Set([
+  "permission_denied",
+  "feature_disabled",
+  "plan_unavailable",
+  "unsupported",
+]);
+
+export function partitionNavigation(
+  items: ReadonlyArray<(typeof nav)[number]>,
+  capabilities: CapabilityResult[],
+) {
+  const byName = new Map(capabilities.map((capability) => [capability.name, capability]));
+  const active: Array<(typeof nav)[number]> = [];
+  const inactive: Array<{ item: (typeof nav)[number]; capability: CapabilityResult }> = [];
+  for (const item of items) {
+    const capabilityName = navigationCapabilities[item[1]];
+    const capability = capabilityName ? byName.get(capabilityName) : undefined;
+    if (capability && unavailableCapabilityStates.has(capability.status)) {
+      inactive.push({ item, capability });
+    } else {
+      active.push(item);
+    }
+  }
+  return { active, inactive };
+}
 
 function Setup({ onDone }: { onDone: () => void }) {
   const [form, setForm] = useState({
@@ -250,14 +303,25 @@ export function Shell({
   const [collapsed, setCollapsed] = useState(false);
   const [mobile, setMobile] = useState(false);
   const [dark, setDark] = useState(() => localStorage.theme !== "light");
+  const [showInactive, setShowInactive] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { range, setRange } = useTimeRange();
-  const visibleNav =
+  const roleNav =
     user.role === "administrator"
       ? nav
       : nav.filter(([label]) => label !== "DNS");
+  const capabilities = useQuery({
+    queryKey: ["navigation-capabilities"],
+    queryFn: () => request<{ items: CapabilityResult[] }>("/capabilities"),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+  const partitionedNav = partitionNavigation(roleNav, capabilities.data?.items ?? []);
+  const visibleNav = partitionedNav.active;
+  const inactiveOpen = showInactive
+    || partitionedNav.inactive.some(({ item }) => item[1] === location.pathname);
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     localStorage.theme = dark ? "dark" : "light";
@@ -310,6 +374,34 @@ export function Shell({
               <span>{label}</span>
             </button>
           ))}
+          {partitionedNav.inactive.length > 0 && (
+            <div className="inactive-nav-section">
+              <button
+                type="button"
+                className="inactive-nav-toggle"
+                aria-expanded={inactiveOpen}
+                onClick={() => setShowInactive((value) => !value)}
+                title="Not in use"
+              >
+                <ChevronRight className={inactiveOpen ? "expanded" : ""} />
+                <span>Not in use ({partitionedNav.inactive.length})</span>
+              </button>
+              {inactiveOpen && partitionedNav.inactive.map(({ item: [label, path, Icon], capability }) => (
+                <button
+                  key={path}
+                  className={`inactive-nav-item ${location.pathname === path ? "active" : ""}`}
+                  onClick={() => {
+                    navigate(path);
+                    setMobile(false);
+                  }}
+                  title={`${label}: ${capability.status.replaceAll("_", " ")}. ${capability.detail || capability.requirement}`}
+                >
+                  <Icon />
+                  <span><strong>{label}</strong><small>{capability.status.replaceAll("_", " ")}</small></span>
+                </button>
+              ))}
+            </div>
+          )}
         </nav>
         <div className="aside-user">
           <CircleUserRound />
@@ -393,6 +485,7 @@ export function Shell({
             />
             <Route path="/tags" element={<InventoryPage kind="tags" />} />
             <Route path="/policy" element={<Policy />} />
+            <Route path="/security/posture" element={<SecurityPosture />} />
             <Route path="/audit" element={<InventoryPage kind="audit" />} />
             <Route path="/sync" element={<InventoryPage kind="sync" />} />
             <Route

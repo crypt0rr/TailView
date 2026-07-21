@@ -10,11 +10,16 @@ from .models import (
     AuditEvent,
     Capability,
     Device,
+    DeviceConnectivity,
+    DevicePostureAttribute,
+    DevicePostureState,
     DnsConfiguration,
     Flow,
     PolicySnapshot,
+    PostureIntegration,
     ServiceEndpoint,
     ServiceHost,
+    TailnetSecuritySettings,
     TailnetService,
     TailnetUser,
     WebhookEndpoint,
@@ -156,6 +161,79 @@ async def seed_demo(session: AsyncSession) -> None:
         ),
     ]
     session.add_all(devices)
+    await session.flush()
+    for demo_device in devices:
+        session.add(
+            DevicePostureState(
+                device_id=demo_device.id,
+                status="available" if demo_device.id != "n-phone" else "stale",
+                last_success=now - timedelta(hours=8)
+                if demo_device.id == "n-phone"
+                else now,
+                checked_at=now,
+            )
+        )
+        session.add_all(
+            [
+                DevicePostureAttribute(
+                    device_id=demo_device.id,
+                    key="node:os",
+                    namespace="node",
+                    value=demo_device.os.casefold(),
+                    value_type="string",
+                    synced_at=now,
+                ),
+                DevicePostureAttribute(
+                    device_id=demo_device.id,
+                    key="node:tsVersion",
+                    namespace="node",
+                    value=demo_device.version,
+                    value_type="string",
+                    synced_at=now,
+                ),
+                DevicePostureAttribute(
+                    device_id=demo_device.id,
+                    key="node:tsAutoUpdate",
+                    namespace="node",
+                    value=demo_device.id not in {"n-phone", "n-db"},
+                    value_type="boolean",
+                    synced_at=now,
+                ),
+            ]
+        )
+    session.add(
+        DeviceConnectivity(
+            device_id="n-laptop",
+            mapping_varies_by_dest_ip=False,
+            derp="ams",
+            endpoints=["192.0.2.10:41641", "10.0.0.22:41641"],
+            latency={"ams": 0.012, "fra": 0.021},
+            client_supports={"hairPinning": True},
+            retrieved_at=now,
+        )
+    )
+    session.add(
+        PostureIntegration(
+            id="demo-edr",
+            name="Demo endpoint security",
+            provider="synthetic",
+            status="connected",
+            synced_at=now,
+        )
+    )
+    session.add(
+        TailnetSecuritySettings(
+            id="current",
+            values={
+                "devicesApprovalOn": True,
+                "devicesAutoUpdatesOn": True,
+                "devicesKeyDurationDays": 180,
+                "networkFlowLoggingOn": True,
+                "postureIdentityCollectionOn": True,
+            },
+            synced_at=now,
+        )
+    )
     session.add(
         TailnetService(
             id="svc:api",
@@ -248,8 +326,10 @@ async def seed_demo(session: AsyncSession) -> None:
     policy_source = """{
       // Demo policy: members can use the API service.
       "groups": {"group:engineering": ["alice@example.com", "carol@example.com"]},
+      "postures": {"posture:updated": ["node:tsVersion >= '1.84.0'", "node:tsAutoUpdate == true"]},
       "grants": [
-        {"src": ["group:engineering"], "dst": ["tag:server"], "ip": ["tcp:443"]},
+        {"src": ["group:engineering"], "dst": ["tag:server"], "ip": ["tcp:443"],
+         "srcPosture": ["posture:updated"]},
         {"src": ["tag:server"], "dst": ["tag:database"], "ip": ["tcp:5432"]}
       ],
       "ssh": [{"action": "check", "src": ["group:engineering"], "dst": ["tag:server"],
@@ -261,8 +341,19 @@ async def seed_demo(session: AsyncSession) -> None:
             hujson=policy_source,
             normalized={
                 "groups": {"group:engineering": ["alice@example.com", "carol@example.com"]},
+                "postures": {
+                    "posture:updated": [
+                        "node:tsVersion >= '1.84.0'",
+                        "node:tsAutoUpdate == true",
+                    ]
+                },
                 "grants": [
-                    {"src": ["group:engineering"], "dst": ["tag:server"], "ip": ["tcp:443"]},
+                    {
+                        "src": ["group:engineering"],
+                        "dst": ["tag:server"],
+                        "ip": ["tcp:443"],
+                        "srcPosture": ["posture:updated"],
+                    },
                     {"src": ["tag:server"], "dst": ["tag:database"], "ip": ["tcp:5432"]},
                 ],
                 "ssh": [
@@ -299,6 +390,9 @@ async def seed_demo(session: AsyncSession) -> None:
         "services": "all:read (no granular Services scope is documented)",
         "dns": "dns:read",
         "webhooks": "webhooks:read",
+        "device_posture": "devices:posture_attributes:read",
+        "posture_integrations": "feature_settings:read",
+        "tailnet_settings": "feature_settings:read",
         "local_telemetry": "optional agent profile and local Tailscale socket",
     }
     for name, requirement in requirements.items():

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     cors_origins: list[str] = []
     log_level: str = "INFO"
     inventory_interval_seconds: int = 300
+    posture_interval_seconds: int = 300
+    security_settings_interval_seconds: int = 900
     policy_interval_seconds: int = 300
     flow_interval_seconds: int = 60
     audit_interval_seconds: int = 300

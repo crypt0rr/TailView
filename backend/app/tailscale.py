@@ -103,7 +103,7 @@ class TailscaleClient:
         return response.text
 
     async def devices(self) -> list[dict[str, Any]]:
-        body = await self.get(f"/tailnet/{self.tailnet}/devices")
+        body = await self.get(f"/tailnet/{self.tailnet}/devices", {"fields": "all"})
         return list(body.get("devices", []))
 
     async def device(self, device_id: str) -> dict[str, Any]:
@@ -116,6 +116,23 @@ class TailscaleClient:
 
     async def routes(self, device_id: str) -> dict[str, Any]:
         return dict(await self.get(f"/device/{device_id}/routes"))
+
+    async def posture_attributes(self, device_id: str) -> dict[str, Any]:
+        encoded = quote(device_id, safe="")
+        return dict(await self.get(f"/device/{encoded}/attributes"))
+
+    async def tailnet_settings(self) -> dict[str, Any]:
+        return dict(await self.get(f"/tailnet/{self.tailnet}/settings"))
+
+    async def posture_integrations(self) -> list[dict[str, Any]]:
+        body = await self.get(f"/tailnet/{self.tailnet}/posture/integrations")
+        if isinstance(body, list):
+            return [item for item in body if isinstance(item, dict)]
+        return list(body.get("integrations", []))
+
+    async def posture_integration(self, integration_id: str) -> dict[str, Any]:
+        encoded = quote(integration_id, safe="")
+        return dict(await self.get(f"/posture/integrations/{encoded}"))
 
     async def policy(self) -> str:
         return await self.get_text(f"/tailnet/{self.tailnet}/acl")

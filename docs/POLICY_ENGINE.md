@@ -13,6 +13,8 @@ TailView parses the current HuJSON policy read-only and evaluates additive allow
 
 Statuses are `fully_evaluated`, `partially_evaluated`, `unsupported_construct`, and `unresolved_selector`. Unknown autogroups, missing posture attributes, app-specific capability semantics, ambiguous routes, and future syntax are never guessed. Application capabilities are displayed as source policy unless their official semantics are explicitly supported.
 
+Device posture evaluation implements `==`, `!=`, `IN`, `NOT IN`, `IS SET`, `NOT SET`, numeric comparisons, and supported version comparisons. Assertions are ANDed within a posture and multiple `srcPosture` entries are ORed. `defaultSrcPosture` applies only when a rule omits an explicit source posture. Missing attributes fail only after a successful fresh attribute response; stale or failed evidence remains incomplete. Shared-node and subnet-routed applicability is not guessed.
+
 Historical observations without a current allow are labelled: “Observed historically; no matching allow rule exists in the current policy. The policy may have changed after this flow occurred.” This is never automatically described as a policy bypass.
 
 ## Duplicate review

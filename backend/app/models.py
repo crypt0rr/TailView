@@ -96,9 +96,69 @@ class Device(Base):
     roles: Mapped[list[str]] = mapped_column(JSON, default=list)
     primary_role: Mapped[str] = mapped_column(String(64), default="standard_node")
     source: Mapped[str] = mapped_column(String(64), default="tailscale_device_api")
+    inventory_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     owner: Mapped[TailnetUser | None] = relationship()
+
+
+class DeviceConnectivity(Base):
+    __tablename__ = "device_connectivity"
+    device_id: Mapped[str] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True
+    )
+    mapping_varies_by_dest_ip: Mapped[bool | None] = mapped_column(Boolean)
+    derp: Mapped[str | None] = mapped_column(String(64))
+    endpoints: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    latency: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    client_supports: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DevicePostureState(Base):
+    __tablename__ = "device_posture_states"
+    device_id: Mapped[str] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="unknown", index=True)
+    error_status: Mapped[str | None] = mapped_column(String(32))
+    last_success: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DevicePostureAttribute(Base):
+    __tablename__ = "device_posture_attributes"
+    __table_args__ = (
+        Index("ix_posture_attributes_key_present", "key", "present"),
+        Index("ix_posture_attributes_expiry", "expiry"),
+    )
+    device_id: Mapped[str] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True
+    )
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(64), index=True)
+    value: Mapped[Any] = mapped_column(JSON)
+    value_type: Mapped[str] = mapped_column(String(16))
+    expiry: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    present: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PostureIntegration(Base):
+    __tablename__ = "posture_integrations"
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    provider: Mapped[str] = mapped_column(String(128), default="unknown")
+    status: Mapped[str] = mapped_column(String(64), default="unknown", index=True)
+    present: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TailnetSecuritySettings(Base):
+    __tablename__ = "tailnet_security_settings"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="current")
+    values: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class LocalMetadata(Base):

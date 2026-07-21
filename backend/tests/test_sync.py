@@ -5,9 +5,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.sync as sync_module
-from app.models import Base, Device, ServiceHost, TailnetService, WebhookEndpoint
+from app.models import (
+    Base,
+    Device,
+    DevicePostureAttribute,
+    DevicePostureState,
+    ServiceHost,
+    TailnetService,
+    WebhookEndpoint,
+)
 from app.sync import (
     _devices_worker,
+    _posture_worker,
     _routes_worker,
     _services_worker,
     _webhooks_worker,
@@ -184,6 +193,75 @@ async def test_device_detail_failure_preserves_last_reported_expiry_state() -> N
 
         assert result[3]["detail_failure_statuses"] == {"upstream_error": 1}
         assert (await session.get(Device, "server")).key_expiry_disabled is True  # type: ignore[union-attr]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_posture_sync_commits_each_device_and_preserves_failed_last_good() -> None:
+    class PostureClient:
+        async def posture_attributes(self, device_id: str) -> dict[str, object]:
+            if device_id == "failed":
+                raise TailscaleError(503, "unavailable")
+            return {
+                "attributes": {"node:os": "linux", "custom:score": 88},
+                "expiries": {"custom:score": "2026-08-01T00:00:00Z"},
+            }
+
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        for device_id in ("successful", "failed"):
+            session.add(
+                Device(
+                    id=device_id,
+                    name=device_id,
+                    active=True,
+                    addresses=[],
+                    tags=[],
+                    advertised_routes=[],
+                    approved_routes=[],
+                    roles=["standard_node"],
+                    primary_role="standard_node",
+                    raw={},
+                )
+            )
+        session.add(
+            DevicePostureState(
+                device_id="failed",
+                status="available",
+                last_success=datetime(2026, 7, 20, tzinfo=UTC),
+            )
+        )
+        session.add(
+            DevicePostureAttribute(
+                device_id="failed",
+                key="custom:lastGood",
+                namespace="custom",
+                value=True,
+                value_type="boolean",
+            )
+        )
+        await session.commit()
+
+        attempted, succeeded, failed, details = await _posture_worker(
+            session, PostureClient()  # type: ignore[arg-type]
+        )
+
+        assert (attempted, succeeded, failed) == (2, 1, 1)
+        assert details["failure_statuses"] == {"upstream_error": 1}
+        successful_state = await session.get(DevicePostureState, "successful")
+        failed_state = await session.get(DevicePostureState, "failed")
+        assert successful_state and successful_state.status == "available"
+        assert failed_state and failed_state.status == "stale"
+        assert await session.get(
+            DevicePostureAttribute, ("failed", "custom:lastGood")
+        ) is not None
+        score = await session.get(
+            DevicePostureAttribute, ("successful", "custom:score")
+        )
+        assert score and score.value_type == "number" and score.expiry is not None
     await engine.dispose()
 
 

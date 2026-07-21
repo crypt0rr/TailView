@@ -14,6 +14,7 @@ async def test_device_client_uses_bearer_and_documented_path() -> None:
     client = TailscaleClient("example.com", api_token="test-token")
     assert await client.devices() == [{"id": "n1"}]
     assert route.calls[0].request.headers["authorization"] == "Bearer test-token"
+    assert route.calls[0].request.url.params["fields"] == "all"
     await client.close()
 
 
@@ -131,4 +132,29 @@ async def test_webhook_client_rejects_an_unexpected_collection_shape() -> None:
 
     with pytest.raises(TailscaleError, match="Unexpected webhook inventory response"):
         await client.webhooks()
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_posture_and_feature_settings_use_read_only_paths() -> None:
+    attributes = respx.get(
+        "https://api.tailscale.com/api/v2/device/node%2Fone/attributes"
+    ).mock(return_value=httpx.Response(200, json={"attributes": {"node:os": "linux"}}))
+    settings = respx.get(
+        "https://api.tailscale.com/api/v2/tailnet/example.com/settings"
+    ).mock(return_value=httpx.Response(200, json={"devicesApprovalOn": True}))
+    integrations = respx.get(
+        "https://api.tailscale.com/api/v2/tailnet/example.com/posture/integrations"
+    ).mock(return_value=httpx.Response(200, json={"integrations": [{"id": "one"}]}))
+    detail = respx.get(
+        "https://api.tailscale.com/api/v2/posture/integrations/one"
+    ).mock(return_value=httpx.Response(200, json={"id": "one", "status": "connected"}))
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert (await client.posture_attributes("node/one"))["attributes"]["node:os"] == "linux"
+    assert (await client.tailnet_settings())["devicesApprovalOn"] is True
+    assert await client.posture_integrations() == [{"id": "one"}]
+    assert (await client.posture_integration("one"))["status"] == "connected"
+    assert attributes.called and settings.called and integrations.called and detail.called
     await client.close()

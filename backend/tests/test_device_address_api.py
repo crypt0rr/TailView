@@ -6,7 +6,18 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api import device as device_endpoint
 from app.config import Settings
-from app.models import AppUser, Base, Capability, Device, Flow, TailnetUser
+from app.models import (
+    AppUser,
+    Base,
+    Capability,
+    Device,
+    DeviceConnectivity,
+    DevicePostureAttribute,
+    DevicePostureState,
+    Flow,
+    PolicySnapshot,
+    TailnetUser,
+)
 
 
 def make_flow(
@@ -117,6 +128,54 @@ async def test_device_endpoint_attributes_only_matching_recent_physical_flows() 
                 ),
             ]
         )
+        policy_source = """{
+          "postures": {"posture:managed": ["custom:managed == true"]},
+          "grants": [{"src": ["*"], "dst": ["tag:server"], "ip": ["*"],
+                      "srcPosture": ["posture:managed"]}]
+        }"""
+        session.add_all(
+            [
+                DevicePostureState(
+                    device_id=selected.id,
+                    status="available",
+                    last_success=datetime.now(UTC),
+                    checked_at=datetime.now(UTC),
+                ),
+                DevicePostureAttribute(
+                    device_id=selected.id,
+                    key="custom:managed",
+                    namespace="custom",
+                    value=True,
+                    value_type="boolean",
+                ),
+                DeviceConnectivity(
+                    device_id=selected.id,
+                    mapping_varies_by_dest_ip=False,
+                    derp="ams",
+                    endpoints=["192.0.2.1:41641"],
+                    latency={"ams": 0.01},
+                    client_supports={"feature": True},
+                ),
+                PolicySnapshot(
+                    id="posture-policy",
+                    hujson=policy_source,
+                    normalized={
+                        "postures": {
+                            "posture:managed": ["custom:managed == true"]
+                        },
+                        "grants": [
+                            {
+                                "src": ["*"],
+                                "dst": ["tag:server"],
+                                "ip": ["*"],
+                                "srcPosture": ["posture:managed"],
+                            }
+                        ],
+                    },
+                    valid=True,
+                ),
+            ]
+        )
         await session.commit()
 
         result = await device_endpoint(
@@ -134,6 +193,12 @@ async def test_device_endpoint_attributes_only_matching_recent_physical_flows() 
             {"id": "observer-node", "name": "observer.example.ts.net"}
         ]
         assert len(inventory["tailnet"]) == 2
+        assert result["posture"]["status"] == "pass"
+        assert result["posture"]["rule_impacts"][0]["status"] == "pass"
+        assert result["connectivity"]["derp"] == "ams"
+        assert result["connectivity"]["provenance"] == (
+            "tailscale_device_api_client_connectivity"
+        )
 
         with pytest.raises(HTTPException) as exc_info:
             await device_endpoint(

@@ -3,7 +3,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
-import { Shell } from "./App";
+import { Shell, nav, partitionNavigation } from "./App";
+import * as apiModule from "./api";
 import { api } from "./api";
 import {
   AddressInventoryView,
@@ -11,6 +12,7 @@ import {
   DeviceTable,
   dnsConfigurationEntries,
   PolicySecurityReview,
+  SecurityPosture,
   dashboardMetricCards,
   keyExpiryState,
   trafficChartData,
@@ -23,6 +25,18 @@ import type { AddressInventory, Device } from "./types";
 describe("TailView", () => {
   it("keeps the product name stable", () => {
     expect("TailView").toMatch(/TailView/);
+  });
+
+  it("moves only definitively unavailable capabilities out of active navigation", () => {
+    const items = nav.filter(([label]) => ["Flows", "Services", "Devices"].includes(label));
+    const result = partitionNavigation(items, [
+      { name: "network_flow_logs", status: "plan_unavailable", requirement: "Premium", detail: "Not included", last_success: null },
+      { name: "services", status: "upstream_error", requirement: "all:read", detail: "Temporary failure", last_success: null },
+    ]);
+
+    expect(result.active.map(([label]) => label)).toEqual(["Devices", "Services"]);
+    expect(result.inactive.map(({ item }) => item[0])).toEqual(["Flows"]);
+    expect(result.inactive[0]?.capability.detail).toBe("Not included");
   });
 
   it("keeps every reported split-DNS field visible in stable order", () => {
@@ -113,6 +127,36 @@ describe("TailView", () => {
 
     expect(onSelect).toHaveBeenCalledOnce();
     expect(onSelect).toHaveBeenCalledWith(device);
+  });
+
+  it("shows fleet posture metrics, limitations, findings, and filters", async () => {
+    const request = vi.spyOn(apiModule, "request").mockImplementation(async (path) => {
+      if (path === "/security/posture") {
+        return {
+          counts: { devices: 2, pass: 1, fail: 1, incomplete: 0, stale: 1, pending_approval: 0, expiring_attributes: 1 },
+          coverage: { devices_with_fresh_evidence: 1, percent: 50 },
+          attribute_coverage: [{ key: "node:os", device_count: 2, percent: 100 }],
+          namespaces: { node: 2 }, auto_update: { true: 1 }, release_tracks: { stable: 2 },
+          findings: [{ severity: "high", kind: "posture_failure", device_id: "n1", device: "node-one", message: "Current posture fails." }],
+          capability: { status: "available", detail: "", last_success: null, required_scope: "all:read" },
+          limitations: ["Current evidence only."],
+        } as never;
+      }
+      if (path.startsWith("/security/posture/devices")) return { items: [], next_cursor: null } as never;
+      if (path === "/security/posture/integrations") return { items: [], capability_status: "available" } as never;
+      if (path === "/security/settings") return { available: true, values: { devicesApprovalOn: true }, synced_at: null, capability_status: "available" } as never;
+      throw new Error(`Unexpected request ${path}`);
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><MemoryRouter><SecurityPosture /></MemoryRouter></QueryClientProvider>);
+
+    expect(await screen.findByText("Security posture")).toBeTruthy();
+    expect(screen.getByText("50%")).toBeTruthy();
+    expect(screen.getByText("Current posture fails.")).toBeTruthy();
+    expect(screen.getByText("Current evidence only.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Posture result filter"), { target: { value: "fail" } });
+    await waitFor(() => expect(request.mock.calls.some(([path]) => String(path).includes("result=fail"))).toBe(true));
+    request.mockRestore();
   });
 
   it("builds dashboard traffic points only from server aggregates", () => {
