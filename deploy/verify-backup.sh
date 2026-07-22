@@ -22,6 +22,10 @@ error_class="VerificationFailed"
 recorded=0
 
 cleanup() {
+  if [ "$status" != "success" ] && docker inspect "$container" >/dev/null 2>&1; then
+    echo "Temporary PostgreSQL logs from the failed verification:" >&2
+    docker logs "$container" >&2 || true
+  fi
   if [ "$recorded" -eq 0 ] && [ -n "${backup_hash:-}" ]; then
     FILENAME="$(basename "$backup_path")" BACKUP_HASH="$backup_hash" BACKUP_SIZE="${backup_size:-0}" \
     STATUS="failed" ERROR_CLASS="$error_class" \
@@ -51,12 +55,33 @@ docker run -d --name "$container" --network "$network" \
   postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa >/dev/null
 
 attempt=0
-until docker exec "$container" pg_isready -U tailview_verify -d tailview_verify >/dev/null 2>&1; do
+until docker logs "$container" 2>&1 | grep -q "PostgreSQL init process complete"; do
   attempt=$((attempt + 1))
-  [ "$attempt" -lt 30 ] || { echo "Temporary PostgreSQL did not become ready" >&2; exit 1; }
+  if [ "$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)" != "true" ]; then
+    error_class="TemporaryDatabaseExited"
+    echo "Temporary PostgreSQL exited during initialization" >&2
+    exit 1
+  fi
+  [ "$attempt" -lt 30 ] || {
+    error_class="TemporaryDatabaseInitializationTimeout"
+    echo "Temporary PostgreSQL initialization did not complete" >&2
+    exit 1
+  }
   sleep 1
 done
 
+attempt=0
+until docker exec "$container" pg_isready -U tailview_verify -d tailview_verify >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 30 ] || {
+    error_class="TemporaryDatabaseReadinessTimeout"
+    echo "Temporary PostgreSQL did not become ready after initialization" >&2
+    exit 1
+  }
+  sleep 1
+done
+
+error_class="RestoreFailed"
 docker exec -i "$container" pg_restore -U tailview_verify -d tailview_verify \
   --clean --if-exists --no-owner --no-privileges < "$backup_path"
 backend_container="$(docker compose ps -q backend)"
@@ -71,6 +96,7 @@ backend_image="$(docker inspect --format '{{.Image}}' "$backend_container")"
   error_class="BackendImageUnavailable"
   exit 1
 }
+error_class="MigrationFailed"
 docker run --rm --network "$network" \
   -e ENVIRONMENT=development \
   -e DATABASE_URL="postgresql+psycopg://tailview_verify:$password@$container:5432/tailview_verify" \
@@ -78,6 +104,7 @@ docker run --rm --network "$network" \
 
 migration_revision="$(docker exec "$container" psql -At -U tailview_verify -d tailview_verify -c 'SELECT version_num FROM alembic_version')"
 postgres_version="$(docker exec "$container" psql -At -U tailview_verify -d tailview_verify -c 'SHOW server_version')"
+error_class="SmokeQueryFailed"
 docker exec "$container" psql -v ON_ERROR_STOP=1 -U tailview_verify -d tailview_verify \
   -c 'SELECT count(*) FROM app_users' \
   -c 'SELECT count(*) FROM devices' \

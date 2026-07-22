@@ -120,6 +120,9 @@ def test_stable_workflow_cannot_build_and_rc_workflow_cannot_move_latest() -> No
 
 def test_backup_drill_uses_the_running_compose_backend_image() -> None:
     script = (ROOT / "deploy" / "verify-backup.sh").read_text(encoding="utf-8")
+    assert "PostgreSQL init process complete" in script
+    assert script.index("PostgreSQL init process complete") < script.index("pg_isready")
+    assert "Temporary PostgreSQL logs from the failed verification" in script
     assert "docker compose ps -q backend" in script
     assert "docker inspect --format '{{.Image}}'" in script
     assert "docker compose build backend" not in script
