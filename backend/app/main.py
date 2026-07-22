@@ -16,6 +16,8 @@ from .api import router
 from .config import get_settings
 from .db import SessionLocal, engine
 from .demo import seed_demo
+from .operations import refresh_prometheus_metrics, scheduler_heartbeat
+from .security import SecretBox
 from .sync import create_scheduler
 
 log = structlog.get_logger()
@@ -38,6 +40,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     scheduler = create_scheduler()
     if not settings.demo_mode:
         scheduler.start()
+        await scheduler_heartbeat()
+    _app.state.scheduler = scheduler
     yield
     if scheduler.running:
         scheduler.shutdown(wait=False)
@@ -105,14 +109,36 @@ async def live() -> dict[str, str]:
 
 
 @app.get("/health/ready")
-async def ready() -> dict[str, str]:
-    async with engine.connect() as connection:
-        await connection.execute(text("SELECT 1"))
-    return {"status": "ready"}
+async def ready(request: Request) -> Response:
+    checks = {"database": False, "migrations": False, "scheduler": False, "encryption": False}
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+            checks["database"] = True
+            if connection.dialect.name != "postgresql" or not settings.production:
+                checks["migrations"] = True
+            else:
+                revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+                checks["migrations"] = revision == "0013_operations_center"
+        SecretBox(settings.encryption_key)
+        checks["encryption"] = True
+        scheduler = getattr(request.app.state, "scheduler", None)
+        checks["scheduler"] = settings.demo_mode or bool(scheduler and scheduler.running)
+    except Exception as exc:
+        log.warning("readiness_check_failed", error_type=type(exc).__name__)
+    ready_value = all(checks.values())
+    return JSONResponse(
+        status_code=200 if ready_value else 503,
+        content={"status": "ready" if ready_value else "not_ready", "checks": checks},
+    )
 
 
 @app.get("/metrics", include_in_schema=False)
 async def metrics() -> Response:
+    try:
+        await refresh_prometheus_metrics()
+    except Exception as exc:
+        log.warning("metrics_refresh_failed", error_type=type(exc).__name__)
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 

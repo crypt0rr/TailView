@@ -85,6 +85,75 @@ export interface SavedViewRecord {
   is_default: boolean;
   compatible: boolean;
 }
+
+export interface OperationalJobState {
+  name: string;
+  category: string;
+  interval_seconds: number;
+  last_status: string;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  last_success_at: string | null;
+  heartbeat_at: string | null;
+  consecutive_failures: number;
+  overdue: boolean;
+  unhealthy: boolean;
+}
+
+export interface OperationsSummary {
+  status: "healthy" | "degraded";
+  generated_at: string;
+  scheduler: OperationalJobState | null;
+  jobs: OperationalJobState[];
+  degraded_jobs: number;
+  queues: Record<string, { depth: number; oldest_age_seconds: number; warning: boolean }>;
+  backup: { configured: boolean; latest_verified_at: string | null; age_seconds: number | null; max_age_hours: number; stale: boolean };
+  latest_cleanup: null | { status: string; started_at: string; finished_at: string | null; deleted: Record<string, number> };
+}
+
+export interface OperationalJobRun {
+  id: string;
+  name: string;
+  category: string;
+  interval_seconds: number;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  processed: number;
+  error_class: string;
+  details: Record<string, unknown>;
+  sync_job_id: string | null;
+  report_run_id: string | null;
+}
+
+export interface OperationsStorage {
+  database_bytes: number | null;
+  relations: Array<{ name: string; total_bytes: number; table_bytes: number; index_bytes: number }>;
+  counts: Record<string, number>;
+  host_capacity_reported: boolean;
+}
+
+export interface OperationsRetention {
+  as_of: string;
+  eligible: Record<string, number>;
+  raw_flow_cleanup_blocked: boolean;
+  aggregate_coverage: Record<string, { start: string | null; end: string | null; last_success: string | null; last_error: string }>;
+  retention_days: Record<string, number>;
+}
+
+export interface BackupVerification {
+  id: string;
+  filename: string;
+  content_hash: string;
+  size: number;
+  status: string;
+  postgres_version: string;
+  migration_revision: string;
+  checks: Record<string, boolean>;
+  error_class: string;
+  verified_at: string;
+}
 export interface PostureAttribute {
   key: string;
   namespace: string;

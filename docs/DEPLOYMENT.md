@@ -8,7 +8,9 @@ For Caddy, set a resolvable `APP_DOMAIN`, use `COOKIE_SECURE=true`, and start th
 
 ## Backup and restore
 
-Create encrypted, access-controlled PostgreSQL custom-format dumps with `pg_dump -Fc`. Restore into a staging database regularly, run all migrations, and validate login, topology, policy, and flow queries. The credential-encryption key is not stored in the database and must be backed up separately.
+Create encrypted, access-controlled PostgreSQL custom-format dumps with `make backup`. TailView writes SHA-256 and JSON sidecars beside the dump. Verify a dump with `make verify-backup FILE=tailview.dump`; the drill creates a uniquely named, isolated PostgreSQL container, restores the dump, applies current migrations, performs safe authentication/inventory/reporting table checks, records the result in **Operations**, and removes the temporary resources. It never targets the live database.
+
+The credential-encryption key is not stored in PostgreSQL and must be backed up separately. A database dump without the matching key cannot decrypt stored integration, MFA, or notification secrets.
 
 ## Upgrade and rollback
 
@@ -22,5 +24,7 @@ Application rollback is safe only when its schema is compatible with the migrate
 ## Resource guidance
 
 Start with two backend CPUs, 1 GiB backend memory, and PostgreSQL sized for flow retention. Large tailnets should monitor database size, query duration, raw flow ingestion, and graph edge counts. Apply host-level limits appropriate for observed load.
+
+The Administrator-only **Operations** workspace reports PostgreSQL relation sizes, retained-record counts, scheduler heartbeats, job executions, queue delay, cleanup previews, aggregate coverage, and backup drill age. Host disk capacity is intentionally not inferred from PostgreSQL and must still be monitored at the container host or infrastructure layer. TailView emits corresponding Prometheus metrics from `/metrics`.
 
 Reporting adds hourly and daily aggregate tables plus retained binary artifacts. Size PostgreSQL for `FLOW_DAILY_AGGREGATE_RETENTION_DAYS` and `REPORT_ARTIFACT_RETENTION_DAYS`, monitor failed or timeout-recovered report runs and aggregate coverage on the Reports page, and keep `REPORT_MAX_CONCURRENT_JOBS=1` unless the backend has sufficient CPU and memory for parallel PDF generation. Existing schema-v1 reports remain valid after the reporting-experience migration.

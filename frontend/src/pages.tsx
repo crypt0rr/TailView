@@ -80,6 +80,11 @@ import type {
   FindingRecord,
   FindingSummary,
   NetworkReport,
+  BackupVerification,
+  OperationalJobRun,
+  OperationsRetention,
+  OperationsStorage,
+  OperationsSummary,
   ReportOptions,
   ReportSection,
   ReportScheduleRecord,
@@ -3252,6 +3257,111 @@ export function SettingsPage({ user }: { user: { role: string } }) {
       </div>
     </div>
   );
+}
+
+type OperationsTab = "overview" | "jobs" | "storage" | "retention" | "backups";
+
+function durationLabel(seconds: number | null | undefined) {
+  if (seconds === null || seconds === undefined) return "Not reported";
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
+}
+
+export function Operations() {
+  const queryClient = useQueryClient();
+  const [params, setParams] = useSearchParams();
+  const tab = (params.get("tab") as OperationsTab | null) ?? "overview";
+  const jobFilter = params.get("job") ?? "";
+  const categoryFilter = params.get("category") ?? "";
+  const statusFilter = params.get("status") ?? "";
+  const setParam = (key: string, value: string) => {
+    const next = new URLSearchParams(params);
+    if (value) next.set(key, value); else next.delete(key);
+    if (key !== "tab") next.set("tab", "jobs");
+    setParams(next, { replace: true });
+  };
+  const summary = useQuery({
+    queryKey: ["operations-summary"],
+    queryFn: () => request<OperationsSummary>("/operations/summary"),
+    refetchInterval: 30_000,
+  });
+  const storage = useQuery({
+    queryKey: ["operations-storage"],
+    queryFn: () => request<OperationsStorage>("/operations/storage"),
+    enabled: tab === "storage" || tab === "overview",
+  });
+  const retention = useQuery({
+    queryKey: ["operations-retention"],
+    queryFn: () => request<OperationsRetention>("/operations/retention"),
+    enabled: tab === "retention" || tab === "overview",
+  });
+  const backups = useQuery({
+    queryKey: ["operations-backups"],
+    queryFn: () => request<{ items: BackupVerification[] }>("/operations/backups"),
+    enabled: tab === "backups" || tab === "overview",
+  });
+  const jobs = useInfiniteQuery({
+    queryKey: ["operations-jobs", jobFilter, categoryFilter, statusFilter],
+    initialPageParam: "",
+    queryFn: ({ pageParam }) => request<Page<OperationalJobRun>>(`/operations/jobs?job=${encodeURIComponent(jobFilter)}&category=${encodeURIComponent(categoryFilter)}&status=${encodeURIComponent(statusFilter)}${pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : ""}`),
+    getNextPageParam: (last) => last.next_cursor || undefined,
+    enabled: tab === "jobs",
+  });
+  const cleanup = useMutation({
+    mutationFn: () => request<{ deleted: Record<string, number> }>("/operations/cleanup/run", { method: "POST" }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["operations-summary"] }),
+        queryClient.invalidateQueries({ queryKey: ["operations-storage"] }),
+        queryClient.invalidateQueries({ queryKey: ["operations-retention"] }),
+        queryClient.invalidateQueries({ queryKey: ["operations-jobs"] }),
+      ]);
+    },
+  });
+  if (summary.isLoading) return <Loading />;
+  if (summary.error) return <ErrorState error={summary.error} />;
+  const value = summary.data!;
+  const jobRows = jobs.data?.pages.flatMap((page) => page.items) ?? [];
+  const queueDepth = Object.values(value.queues).reduce((total, queue) => total + queue.depth, 0);
+  const eligible = Object.values(retention.data?.eligible ?? {}).reduce((total, count) => total + count, 0);
+  return <div className="page operations-page">
+    <PageHead eyebrow="TAILVIEW OPERATIONS" title="Operations" description="Runtime health, scheduled work, storage, retention, and verified recovery evidence." actions={<Badge tone={value.status === "healthy" ? "success" : "warning"}>{value.status === "healthy" ? <CheckCircle2 /> : <AlertTriangle />}{value.status}</Badge>} />
+    <div className="tabs" role="tablist" aria-label="Operations workspace">
+      {(["overview", "jobs", "storage", "retention", "backups"] as OperationsTab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setParam("tab", item)}>{item}</button>)}
+    </div>
+    {tab === "overview" && <>
+      <div className="metric-grid operations-metrics">
+        <Card className="metric-card"><span>Scheduler</span><strong>{value.scheduler?.last_status ?? "Unknown"}</strong><small>{value.scheduler?.heartbeat_at ? `Heartbeat ${relativeTime(value.scheduler.heartbeat_at)}` : "No heartbeat recorded"}</small></Card>
+        <Card className="metric-card"><span>Degraded jobs</span><strong>{value.degraded_jobs}</strong><small>{value.jobs.length} instrumented jobs</small></Card>
+        <Card className="metric-card"><span>Queued work</span><strong>{queueDepth}</strong><small>Reports and notification deliveries</small></Card>
+        <Card className="metric-card"><span>Database</span><strong>{storage.data?.database_bytes === null || storage.data?.database_bytes === undefined ? "Not reported" : formatBytes(storage.data.database_bytes)}</strong><small>Host capacity requires host monitoring</small></Card>
+      </div>
+      <div className="operations-grid">
+        <Card><CardHead title="Scheduled work" detail="A job is overdue after three expected intervals, with a ten-minute minimum." action={<button className="text-link" onClick={() => setParam("tab", "jobs")}>View history</button>} />
+          <div className="operations-status-list">{value.jobs.filter((job) => job.name !== "scheduler").map((job) => <button key={job.name} onClick={() => setParam("job", job.name)}><span><strong>{job.name}</strong><small>{job.category} · every {durationLabel(job.interval_seconds)}</small></span><Badge tone={job.unhealthy ? "warning" : job.last_status === "success" ? "success" : "neutral"}>{job.overdue ? "overdue" : job.last_status}</Badge></button>)}</div>
+        </Card>
+        <Card><CardHead title="Queues" detail="Oldest pending work is evaluated against the configured warning age." />
+          {Object.entries(value.queues).map(([name, queue]) => <div className="setting-row" key={name}><div><strong>{name}</strong><p>{queue.depth} pending · oldest {durationLabel(queue.oldest_age_seconds)}</p></div><Badge tone={queue.warning ? "warning" : "success"}>{queue.warning ? "delayed" : "healthy"}</Badge></div>)}
+        </Card>
+        <Card><CardHead title="Retention" detail={`${eligible} rows currently eligible across managed datasets.`} action={<button className="text-link" onClick={() => setParam("tab", "retention")}>Review</button>} />
+          {retention.data?.raw_flow_cleanup_blocked && <div className="notice-bar warning"><AlertTriangle /><span>Raw-flow cleanup is blocked until aggregate coverage reaches the retention boundary.</span></div>}
+          <p className="muted">Cleanup is advisory-locked and records an immutable result.</p>
+        </Card>
+        <Card><CardHead title="Recovery evidence" detail="Backups are useful only after an isolated restore drill." action={<button className="text-link" onClick={() => setParam("tab", "backups")}>View drills</button>} />
+          <div className="setting-row"><div><strong>{value.backup.configured ? "Verification recorded" : "Not configured"}</strong><p>{value.backup.latest_verified_at ? `Latest ${relativeTime(value.backup.latest_verified_at)}` : "Run make verify-backup FILE=…"}</p></div><Badge tone={!value.backup.configured ? "neutral" : value.backup.stale ? "warning" : "success"}>{!value.backup.configured ? "opt in" : value.backup.stale ? "stale" : "current"}</Badge></div>
+        </Card>
+      </div>
+    </>}
+    {tab === "jobs" && <>
+      <div className="toolbar operations-filters"><select aria-label="Operational job" value={jobFilter} onChange={(event) => setParam("job", event.target.value)}><option value="">All jobs</option>{value.jobs.filter((job) => job.name !== "scheduler").map((job) => <option key={job.name} value={job.name}>{job.name}</option>)}</select><select aria-label="Job category" value={categoryFilter} onChange={(event) => setParam("category", event.target.value)}><option value="">All categories</option>{[...new Set(value.jobs.map((job) => job.category))].map((category) => <option key={category}>{category}</option>)}</select><select aria-label="Job status" value={statusFilter} onChange={(event) => setParam("status", event.target.value)}><option value="">All statuses</option>{["success", "failed", "partial_success", "running", "skipped", "lock_skipped", "cancelled"].map((status) => <option key={status}>{status}</option>)}</select></div>
+      {jobs.isLoading ? <Loading /> : jobs.error ? <ErrorState error={jobs.error} /> : !jobRows.length ? <Empty title="No matching executions" detail="Scheduled executions will appear after the scheduler runs." /> : <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th><th>Processed</th><th>Reference</th></tr></thead><tbody>{jobRows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong><small className="block">{row.category}</small></td><td><Badge tone={row.status === "success" ? "success" : row.status === "failed" ? "danger" : row.status === "partial_success" ? "warning" : "neutral"}>{row.status.replaceAll("_", " ")}</Badge>{row.error_class && <small className="block">{row.error_class}</small>}</td><td>{relativeTime(row.started_at)}</td><td>{row.duration_ms === null ? "Running" : `${row.duration_ms} ms`}</td><td>{row.processed}</td><td>{row.sync_job_id ? <Link to="/sync">Sync job</Link> : row.report_run_id ? <Link to={`/reports?report=${row.report_run_id}`}>Report</Link> : "—"}</td></tr>)}</tbody></table></div>{jobs.hasNextPage && <Button variant="secondary" onClick={() => void jobs.fetchNextPage()}>Load more</Button>}</Card>}
+    </>}
+    {tab === "storage" && (storage.isLoading ? <Loading /> : storage.error ? <ErrorState error={storage.error} /> : <div className="operations-grid"><Card><CardHead title="Managed records" detail="Counts by retained data class." />{Object.entries(storage.data?.counts ?? {}).map(([name, count]) => <div className="setting-row" key={name}><strong>{name.replaceAll("_", " ")}</strong><span>{count.toLocaleString()}</span></div>)}</Card><Card><CardHead title="PostgreSQL relations" detail="Table and index usage; host filesystem capacity is deliberately not inferred." />{!storage.data?.relations.length ? <Empty title="Relation sizes unavailable" detail="Detailed relation sizes require PostgreSQL." /> : <div className="table-scroll"><table><thead><tr><th>Relation</th><th>Total</th><th>Table</th><th>Indexes</th></tr></thead><tbody>{storage.data.relations.map((row) => <tr key={row.name}><td>{row.name}</td><td>{formatBytes(row.total_bytes)}</td><td>{formatBytes(row.table_bytes)}</td><td>{formatBytes(row.index_bytes)}</td></tr>)}</tbody></table></div>}</Card></div>)}
+    {tab === "retention" && (retention.isLoading ? <Loading /> : retention.error ? <ErrorState error={retention.error} /> : <><div className="notice-bar"><Clock3 /><span>Effective settings are environment-driven. This page previews what a cleanup would remove.</span></div>{retention.data?.raw_flow_cleanup_blocked && <div className="notice-bar warning"><AlertTriangle /><span>Raw flows remain protected because aggregate coverage does not yet reach the raw retention cutoff.</span></div>}<Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Dataset</th><th>Retention</th><th>Eligible rows</th></tr></thead><tbody>{Object.entries(retention.data?.retention_days ?? {}).map(([name, days]) => <tr key={name}><td>{name.replaceAll("_", " ")}</td><td>{days} days</td><td>{(retention.data?.eligible[name] ?? 0).toLocaleString()}</td></tr>)}</tbody></table></div><div className="card-actions"><Button variant="secondary" onClick={() => void retention.refetch()}>Refresh preview</Button><Button disabled={cleanup.isPending} onClick={() => { if (window.confirm("Delete only records currently eligible under the configured retention policy?")) cleanup.mutate(); }}>{cleanup.isPending ? "Cleaning…" : "Run cleanup"}</Button></div>{cleanup.error && <ErrorState error={cleanup.error} />}</Card></>)}
+    {tab === "backups" && (backups.isLoading ? <Loading /> : backups.error ? <ErrorState error={backups.error} /> : !backups.data?.items.length ? <Empty title="No backup drills recorded" detail="Create a dump with make backup, then run make verify-backup FILE=tailview.dump. Verification restores only to an isolated temporary PostgreSQL instance." /> : <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Backup</th><th>Status</th><th>Verified</th><th>Size</th><th>PostgreSQL</th><th>Migration</th><th>SHA-256</th></tr></thead><tbody>{backups.data.items.map((row) => <tr key={row.id}><td>{row.filename}</td><td><Badge tone={row.status === "success" ? "success" : "danger"}>{row.status}</Badge>{row.error_class && <small className="block">{row.error_class}</small>}</td><td>{relativeTime(row.verified_at)}</td><td>{formatBytes(row.size)}</td><td>{row.postgres_version || "Not reported"}</td><td><code>{row.migration_revision || "Not reported"}</code></td><td><code title={row.content_hash}>{row.content_hash.slice(0, 12)}…</code></td></tr>)}</tbody></table></div></Card>)}
+  </div>;
 }
 
 type ReportsUser = { role: "administrator" | "viewer" };

@@ -50,6 +50,7 @@ import {
   Findings,
   InventoryPage,
   Policy,
+  Operations,
   Reports,
   SettingsPage,
   Services,
@@ -65,6 +66,7 @@ export const nav = [
   ["Topology", "/topology", Network],
   ["Flows", "/flows", Activity],
   ["Reports", "/reports", FileChartColumn],
+  ["Operations", "/operations", Activity],
   ["Devices", "/devices", Server],
   ["Users", "/users", Users],
   ["Groups", "/groups", Boxes],
@@ -411,7 +413,7 @@ export function Shell({
   const roleNav =
     user.role === "administrator"
       ? nav
-      : nav.filter(([label]) => !["DNS", "Access governance"].includes(label));
+      : nav.filter(([label]) => !["DNS", "Access governance", "Operations"].includes(label));
   const capabilities = useQuery({
     queryKey: ["navigation-capabilities"],
     queryFn: () => request<{
@@ -596,6 +598,7 @@ export function Shell({
             <Route path="/topology" element={<Topology />} />
             <Route path="/flows" element={<Flows />} />
             <Route path="/reports" element={<Reports user={user} />} />
+            <Route path="/operations" element={user.role === "administrator" ? <Operations /> : <Navigate to="/" replace />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/users" element={<InventoryPage kind="users" />} />
             <Route path="/groups" element={<InventoryPage kind="groups" />} />

@@ -42,8 +42,9 @@ from .models import (
     TailnetUser,
     WebhookEndpoint,
 )
+from .operations import cleanup_operations_job, instrument_job, scheduler_heartbeat
 from .policy import parse_policy
-from .reporting import aggregate_flows_job, cleanup_reporting_job, reporting_cycle
+from .reporting import aggregate_flows_job, reporting_cycle
 from .security import SecretBox
 from .tailscale import TailscaleClient, TailscaleError, capability_status
 
@@ -1430,17 +1431,20 @@ def create_scheduler() -> AsyncIOScheduler:
     settings = get_settings()
     scheduler = AsyncIOScheduler(timezone="UTC")
     for source in (sync_users, sync_devices, sync_routes, sync_services, sync_dns, sync_webhooks):
+        name = source.__name__.removeprefix("sync_")
         scheduler.add_job(
-            source,
+            instrument_job(name, "synchronization", settings.inventory_interval_seconds, source),
             "interval",
             seconds=settings.inventory_interval_seconds,
-            id=source.__name__.removeprefix("sync_"),
+            id=name,
             max_instances=1,
             coalesce=True,
             jitter=15,
         )
     scheduler.add_job(
-        sync_posture,
+        instrument_job(
+            "posture", "synchronization", settings.posture_interval_seconds, sync_posture
+        ),
         "interval",
         seconds=settings.posture_interval_seconds,
         id="posture",
@@ -1449,27 +1453,31 @@ def create_scheduler() -> AsyncIOScheduler:
         jitter=15,
     )
     for source in (sync_posture_integrations, sync_tailnet_settings):
+        name = source.__name__.removeprefix("sync_")
         scheduler.add_job(
-            source,
+            instrument_job(
+                name, "synchronization", settings.security_settings_interval_seconds, source
+            ),
             "interval",
             seconds=settings.security_settings_interval_seconds,
-            id=source.__name__.removeprefix("sync_"),
+            id=name,
             max_instances=1,
             coalesce=True,
             jitter=30,
         )
     for source in (sync_credentials, sync_device_invites, sync_contacts, sync_log_streaming):
+        name = source.__name__.removeprefix("sync_")
         scheduler.add_job(
-            source,
+            instrument_job(name, "synchronization", settings.governance_interval_seconds, source),
             "interval",
             seconds=settings.governance_interval_seconds,
-            id=source.__name__.removeprefix("sync_"),
+            id=name,
             max_instances=1,
             coalesce=True,
             jitter=30,
         )
     scheduler.add_job(
-        sync_policy,
+        instrument_job("policy", "synchronization", settings.policy_interval_seconds, sync_policy),
         "interval",
         seconds=settings.policy_interval_seconds,
         id="policy",
@@ -1478,7 +1486,7 @@ def create_scheduler() -> AsyncIOScheduler:
         jitter=15,
     )
     scheduler.add_job(
-        sync_logs,
+        instrument_job("flows", "synchronization", settings.flow_interval_seconds, sync_logs),
         "interval",
         args=["flows"],
         seconds=settings.flow_interval_seconds,
@@ -1488,7 +1496,7 @@ def create_scheduler() -> AsyncIOScheduler:
         jitter=5,
     )
     scheduler.add_job(
-        sync_logs,
+        instrument_job("audit", "synchronization", settings.audit_interval_seconds, sync_logs),
         "interval",
         args=["audit"],
         seconds=settings.audit_interval_seconds,
@@ -1498,7 +1506,9 @@ def create_scheduler() -> AsyncIOScheduler:
         jitter=15,
     )
     scheduler.add_job(
-        evaluate_findings_job,
+        instrument_job(
+            "findings", "security", settings.findings_interval_seconds, evaluate_findings_job
+        ),
         "interval",
         seconds=settings.findings_interval_seconds,
         id="findings",
@@ -1507,7 +1517,7 @@ def create_scheduler() -> AsyncIOScheduler:
         jitter=15,
     )
     scheduler.add_job(
-        deliver_notifications_job,
+        instrument_job("notification-delivery", "delivery", 30, deliver_notifications_job),
         "interval",
         seconds=30,
         id="notification-delivery",
@@ -1516,7 +1526,7 @@ def create_scheduler() -> AsyncIOScheduler:
         jitter=5,
     )
     scheduler.add_job(
-        cleanup_findings_job,
+        instrument_job("findings-cleanup", "cleanup", 86400, cleanup_findings_job),
         "interval",
         hours=24,
         id="findings-cleanup",
@@ -1525,7 +1535,7 @@ def create_scheduler() -> AsyncIOScheduler:
         jitter=300,
     )
     scheduler.add_job(
-        aggregate_flows_job,
+        instrument_job("flow-aggregates", "aggregation", 300, aggregate_flows_job),
         "interval",
         minutes=5,
         id="flow-aggregates",
@@ -1534,7 +1544,7 @@ def create_scheduler() -> AsyncIOScheduler:
         jitter=20,
     )
     scheduler.add_job(
-        reporting_cycle,
+        instrument_job("network-reports", "reporting", 30, reporting_cycle),
         "interval",
         seconds=30,
         id="network-reports",
@@ -1543,12 +1553,20 @@ def create_scheduler() -> AsyncIOScheduler:
         jitter=5,
     )
     scheduler.add_job(
-        cleanup_reporting_job,
+        instrument_job("operations-cleanup", "cleanup", 86400, cleanup_operations_job),
         "interval",
         hours=24,
         id="reporting-cleanup",
         max_instances=1,
         coalesce=True,
         jitter=300,
+    )
+    scheduler.add_job(
+        scheduler_heartbeat,
+        "interval",
+        seconds=30,
+        id="scheduler-heartbeat",
+        max_instances=1,
+        coalesce=True,
     )
     return scheduler

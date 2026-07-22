@@ -1,4 +1,4 @@
-.PHONY: install lint test build compose-check up down backup restore
+.PHONY: install lint test build compose-check up down backup restore verify-backup
 install:
 	cd frontend && npm ci
 build:
@@ -21,3 +21,6 @@ backup:
 restore:
 	@test -n "$(FILE)" || (echo "Usage: make restore FILE=tailview.dump" && exit 2)
 	sh deploy/restore.sh "$(FILE)"
+verify-backup:
+	@test -n "$(FILE)" || (echo "Usage: make verify-backup FILE=tailview.dump" && exit 2)
+	sh deploy/verify-backup.sh "$(FILE)"

@@ -458,6 +458,75 @@ class SyncJob(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
+class OperationalJobState(Base):
+    __tablename__ = "operational_job_states"
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    interval_seconds: Mapped[int] = mapped_column(Integer)
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_status: Mapped[str] = mapped_column(String(32), default="never")
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class OperationalJobRun(Base):
+    __tablename__ = "operational_job_runs"
+    __table_args__ = (
+        Index("ix_operational_job_runs_started_id", "started_at", "id"),
+        Index("ix_operational_job_runs_name_status", "name", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    interval_seconds: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="running", index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(BigInteger)
+    processed: Mapped[int] = mapped_column(Integer, default=0)
+    error_class: Mapped[str] = mapped_column(String(128), default="")
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    sync_job_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    report_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+
+
+class OperationalSignalState(Base):
+    __tablename__ = "operational_signal_states"
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    consecutive_observations: Mapped[int] = mapped_column(Integer, default=0)
+    last_present: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CleanupRun(Base):
+    __tablename__ = "cleanup_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    trigger: Mapped[str] = mapped_column(String(32), default="scheduled")
+    preview: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    deleted: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_class: Mapped[str] = mapped_column(String(128), default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BackupVerification(Base):
+    __tablename__ = "backup_verifications"
+    __table_args__ = (Index("ix_backup_verifications_verified_id", "verified_at", "id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    filename: Mapped[str] = mapped_column(String(255))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    size: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    postgres_version: Mapped[str] = mapped_column(String(64), default="")
+    migration_revision: Mapped[str] = mapped_column(String(128), default="")
+    checks: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_class: Mapped[str] = mapped_column(String(128), default="")
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class TailnetService(Base):
     __tablename__ = "tailnet_services"
     id: Mapped[str] = mapped_column(String(255), primary_key=True)

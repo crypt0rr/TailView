@@ -14,13 +14,15 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import Settings, get_settings
 from .db import SessionLocal, engine
 from .models import (
+    BackupVerification,
     Capability,
+    CleanupRun,
     Device,
     DeviceInvite,
     DevicePostureAttribute,
@@ -28,9 +30,13 @@ from .models import (
     Finding,
     FindingOccurrence,
     FindingTransition,
+    FlowAggregateState,
     NotificationDelivery,
     NotificationEndpoint,
+    OperationalJobState,
+    OperationalSignalState,
     PolicySnapshot,
+    ReportRun,
     SyncJob,
     TailnetContact,
     TailnetCredential,
@@ -72,6 +78,24 @@ def public_subject_id(value: str) -> str:
     return hashlib.sha256(f"tailview-subject:{value}".encode()).hexdigest()
 
 
+async def _persistent_operational_signal(
+    session: AsyncSession, key: str, present: bool, now: datetime
+) -> bool:
+    row = await session.get(OperationalSignalState, key)
+    if row is None:
+        row = OperationalSignalState(
+            key=key, consecutive_observations=0, last_present=False
+        )
+    if present:
+        row.consecutive_observations = row.consecutive_observations + 1 if row.last_present else 1
+    else:
+        row.consecutive_observations = 0
+    row.last_present = present
+    row.last_evaluated_at = now
+    session.add(row)
+    return present and row.consecutive_observations >= 2
+
+
 def _aware(value: datetime | None) -> datetime | None:
     if value and value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -96,7 +120,7 @@ async def collect_findings(
     now = now or datetime.now(UTC)
     candidates: list[FindingCandidate] = []
     capabilities = {row.name: row for row in (await session.scalars(select(Capability))).all()}
-    complete: set[str] = {"sync_health"}
+    complete: set[str] = {"sync_health", "operations"}
     devices = (await session.scalars(select(Device).where(Device.active.is_(True)))).all()
 
     if (
@@ -421,6 +445,207 @@ async def collect_findings(
                     link_path="/sync",
                 )
             )
+
+    settings = get_settings()
+    operational_states = (await session.scalars(select(OperationalJobState))).all()
+    for operational_state in operational_states:
+        if operational_state.name == "scheduler":
+            continue
+        heartbeat = _aware(operational_state.heartbeat_at)
+        overdue_after = max(operational_state.interval_seconds * 3, 600)
+        overdue = heartbeat is not None and (now - heartbeat).total_seconds() > overdue_after
+        overdue_persistent = await _persistent_operational_signal(
+            session, f"job-overdue:{operational_state.name}", overdue, now
+        )
+        abandoned = operational_state.last_status == "running" and overdue
+        if operational_state.consecutive_failures >= 2:
+            candidates.append(
+                FindingCandidate(
+                    source="operations",
+                    category="repeated_job_failure",
+                    severity="high",
+                    title="TailView scheduled job repeatedly failed",
+                    summary=(
+                        f"{operational_state.name} failed "
+                        f"{operational_state.consecutive_failures} "
+                        "consecutive executions."
+                    ),
+                    remediation="Open Operations and inspect the linked execution history.",
+                    subject_type="operational_job",
+                    subject_id=public_subject_id(operational_state.name),
+                    subject_display=operational_state.name,
+                    rule_id="two-consecutive-operational-failures",
+                    visibility="administrator",
+                    evidence={
+                        "consecutive_failures": operational_state.consecutive_failures,
+                        "last_status": operational_state.last_status,
+                    },
+                    link_path=f"/operations?job={operational_state.name}",
+                )
+            )
+        elif overdue_persistent:
+            candidates.append(
+                FindingCandidate(
+                    source="operations",
+                    category="abandoned_job" if abandoned else "overdue_job",
+                    severity="high" if abandoned else "medium",
+                    title="TailView job appears abandoned"
+                    if abandoned
+                    else "TailView job is overdue",
+                    summary=(
+                        f"{operational_state.name} has not completed within its expected "
+                        "execution window."
+                    ),
+                    remediation="Check scheduler health, advisory locks, and the latest execution.",
+                    subject_type="operational_job",
+                    subject_id=public_subject_id(operational_state.name),
+                    subject_display=operational_state.name,
+                    rule_id="abandoned" if abandoned else "overdue",
+                    visibility="administrator",
+                    evidence={
+                        "heartbeat_at": heartbeat.isoformat() if heartbeat else None,
+                        "interval_seconds": operational_state.interval_seconds,
+                    },
+                    link_path=f"/operations?job={operational_state.name}",
+                )
+            )
+
+    for queue_name, model, statuses, timestamp_column in (
+        ("reports", ReportRun, ["queued"], ReportRun.created_at),
+        (
+            "notifications",
+            NotificationDelivery,
+            ["pending", "retrying"],
+            NotificationDelivery.created_at,
+        ),
+    ):
+        oldest = _aware(
+            await session.scalar(
+                select(func.min(timestamp_column)).where(model.status.in_(statuses))
+            )
+        )
+        delayed = bool(
+            oldest and now - oldest > timedelta(minutes=settings.operations_queue_warn_minutes)
+        )
+        delayed_persistent = await _persistent_operational_signal(
+            session, f"queue-delay:{queue_name}", delayed, now
+        )
+        if oldest and delayed_persistent:
+            candidates.append(
+                FindingCandidate(
+                    source="operations",
+                    category="queue_delay",
+                    severity="medium",
+                    title="TailView work queue is delayed",
+                    summary=(
+                        f"The oldest {queue_name} queue item exceeds the configured "
+                        "delay threshold."
+                    ),
+                    remediation="Inspect the Operations queue and its worker execution history.",
+                    subject_type="operational_queue",
+                    subject_id=public_subject_id(queue_name),
+                    subject_display=queue_name,
+                    rule_id="queue-oldest-age",
+                    visibility="administrator",
+                    evidence={
+                        "oldest_at": oldest.isoformat(),
+                        "threshold_minutes": settings.operations_queue_warn_minutes,
+                    },
+                    link_path="/operations",
+                )
+            )
+
+    aggregate_states = (await session.scalars(select(FlowAggregateState))).all()
+    for aggregate_state in aggregate_states:
+        last_success = _aware(aggregate_state.last_success)
+        stale = bool(last_success and now - last_success > timedelta(minutes=15))
+        stale_persistent = await _persistent_operational_signal(
+            session, f"aggregate-stale:{aggregate_state.granularity}", stale, now
+        )
+        if last_success and stale_persistent:
+            candidates.append(
+                FindingCandidate(
+                    source="operations",
+                    category="stale_aggregates",
+                    severity="medium",
+                    title="Traffic aggregates are stale",
+                    summary=(
+                        f"The {aggregate_state.granularity} aggregate has not succeeded recently."
+                    ),
+                    remediation="Inspect flow ingestion and the flow-aggregates scheduled job.",
+                    subject_type="aggregate",
+                    subject_id=public_subject_id(aggregate_state.granularity),
+                    subject_display=aggregate_state.granularity,
+                    rule_id="aggregate-last-success",
+                    visibility="administrator",
+                    evidence={
+                        "last_success": last_success.isoformat(),
+                        "last_error": aggregate_state.last_error,
+                    },
+                    link_path="/operations",
+                )
+            )
+
+    cleanup_rows = (
+        await session.scalars(select(CleanupRun).order_by(CleanupRun.started_at.desc()).limit(2))
+    ).all()
+    if len(cleanup_rows) >= 2 and all(row.status == "failed" for row in cleanup_rows):
+        candidates.append(
+            FindingCandidate(
+                source="operations",
+                category="cleanup_failure",
+                severity="high",
+                title="Retention cleanup repeatedly failed",
+                summary="The two latest retention cleanup executions failed.",
+                remediation="Inspect cleanup history before storage continues to grow.",
+                subject_type="cleanup",
+                subject_id=public_subject_id("retention-cleanup"),
+                subject_display="retention cleanup",
+                rule_id="two-cleanup-failures",
+                visibility="administrator",
+                evidence={"latest_error_class": cleanup_rows[0].error_class},
+                link_path="/operations",
+            )
+        )
+
+    latest_backup = await session.scalar(
+        select(BackupVerification)
+        .where(BackupVerification.status == "success")
+        .order_by(BackupVerification.verified_at.desc())
+        .limit(1)
+    )
+    latest_verified_at = _aware(latest_backup.verified_at) if latest_backup else None
+    backup_stale = bool(
+        latest_verified_at
+        and now - latest_verified_at > timedelta(hours=settings.operations_backup_max_age_hours)
+    )
+    backup_stale_persistent = await _persistent_operational_signal(
+        session, "backup-verification-stale", backup_stale, now
+    )
+    if latest_verified_at and backup_stale_persistent:
+        candidates.append(
+            FindingCandidate(
+                source="operations",
+                category="stale_backup_verification",
+                severity="high",
+                title="Backup verification is stale",
+                summary=(
+                    "No successful isolated backup drill was recorded within the "
+                    "configured interval."
+                ),
+                remediation="Run make verify-backup FILE=… against a recent dump.",
+                subject_type="backup",
+                subject_id=public_subject_id("database-backup"),
+                subject_display="database backup",
+                rule_id="backup-verification-age",
+                visibility="administrator",
+                evidence={
+                    "last_verified_at": latest_verified_at.isoformat(),
+                    "max_age_hours": settings.operations_backup_max_age_hours,
+                },
+                link_path="/operations",
+            )
+        )
     return candidates, complete
 
 

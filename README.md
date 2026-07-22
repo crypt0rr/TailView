@@ -21,6 +21,7 @@ TailView is a self-hosted, read-only observability dashboard for a Tailscale tai
 - In-app network usage reports generated from saved Flow views, with 13 months of compact aggregate history and authenticated PDF, JSON, and CSV evidence downloads.
 - Read-only HuJSON policy snapshots, normalized Grants/ACL sections, selector expansion, and explicit incomplete/unsupported results.
 - Configuration audit events, synchronization history, independent capability states, Prometheus metrics, and structured logs.
+- Administrator Operations center for scheduler health, queue delay, PostgreSQL growth, retention safety, aggregate coverage, and isolated backup verification.
 - Administrator DNS inventory covering MagicDNS preferences, nameservers, search domains, split-DNS routing, freshness, and API provenance.
 - Isolated demo mode and an explicitly opt-in local telemetry profile.
 
@@ -111,6 +112,6 @@ docker compose pull
 docker compose up -d --build
 ```
 
-Use `make backup` or `make restore FILE=tailview.dump`. Restore into an empty database when possible and test procedures regularly; see [deployment details](docs/DEPLOYMENT.md).
+Use `make backup`, verify it safely with `make verify-backup FILE=tailview.dump`, or restore deliberately with `make restore FILE=tailview.dump`. The verification command never targets the live database; see [deployment details](docs/DEPLOYMENT.md).
 
 Licensed under the [MIT License](LICENSE).

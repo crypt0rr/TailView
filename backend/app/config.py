@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     report_generation_timeout_seconds: int = Field(default=120, ge=30, le=900)
     report_max_artifact_bytes: int = Field(default=20_000_000, ge=1_000_000, le=100_000_000)
     report_max_concurrent_jobs: int = Field(default=1, ge=1, le=4)
+    operations_job_retention_days: int = Field(default=30, ge=7, le=180)
+    operations_history_retention_days: int = Field(default=180, ge=30, le=800)
+    operations_backup_max_age_hours: int = Field(default=48, ge=1, le=8760)
+    operations_queue_warn_minutes: int = Field(default=10, ge=1, le=1440)
     trusted_proxies: list[str] = []
     telemetry_secret: str = Field(default="", alias="TAILVIEW_TELEMETRY_SECRET")
 

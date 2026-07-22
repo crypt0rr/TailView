@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .models import (
     AppUser,
     AuditEvent,
+    BackupVerification,
     Capability,
+    CleanupRun,
     Device,
     DeviceConnectivity,
     DeviceInvite,
@@ -23,6 +25,8 @@ from .models import (
     Flow,
     FlowAggregateState,
     LogStreamingConfiguration,
+    OperationalJobRun,
+    OperationalJobState,
     PolicySnapshot,
     PostureIntegration,
     ReportArtifact,
@@ -867,4 +871,69 @@ async def seed_demo(session: AsyncSession) -> None:
                 last_success=now if name != "local_telemetry" else None,
             )
         )
+    operation_jobs = [
+        ("scheduler", "runtime", 30, "success", 0, now - timedelta(seconds=10)),
+        ("devices", "synchronization", 300, "success", 0, now - timedelta(minutes=2)),
+        ("flow-aggregates", "aggregation", 300, "success", 0, now - timedelta(minutes=3)),
+        ("network-reports", "reporting", 30, "failed", 2, now - timedelta(minutes=1)),
+        ("notification-delivery", "delivery", 30, "success", 0, now - timedelta(seconds=15)),
+        ("operations-cleanup", "cleanup", 86400, "success", 0, now - timedelta(hours=8)),
+    ]
+    for name, category, interval, status_value, failures, heartbeat in operation_jobs:
+        session.add(
+            OperationalJobState(
+                name=name,
+                category=category,
+                interval_seconds=interval,
+                last_started_at=heartbeat - timedelta(seconds=2),
+                last_finished_at=heartbeat,
+                last_success_at=heartbeat
+                if status_value == "success"
+                else now - timedelta(hours=1),
+                last_status=status_value,
+                consecutive_failures=failures,
+                heartbeat_at=heartbeat,
+            )
+        )
+        session.add(
+            OperationalJobRun(
+                name=name,
+                category=category,
+                interval_seconds=interval,
+                status=status_value,
+                started_at=heartbeat - timedelta(seconds=2),
+                finished_at=heartbeat,
+                duration_ms=2000,
+                error_class="DemoWorkerError" if status_value == "failed" else "",
+                details={"demo": True},
+            )
+        )
+    session.add(
+        CleanupRun(
+            status="success",
+            trigger="scheduled",
+            preview={"eligible": {"raw_payloads": 12}},
+            deleted={"raw_payloads": 12},
+            started_at=now - timedelta(hours=8),
+            finished_at=now - timedelta(hours=8) + timedelta(seconds=2),
+        )
+    )
+    session.add(
+        BackupVerification(
+            filename="tailview-demo.dump",
+            content_hash=hashlib.sha256(b"synthetic-demo-backup").hexdigest(),
+            size=8_388_608,
+            status="success",
+            postgres_version="17.5",
+            migration_revision="0013_operations_center",
+            checks={
+                "restore": True,
+                "migrations": True,
+                "authentication_table": True,
+                "inventory_table": True,
+                "reporting_table": True,
+            },
+            verified_at=now - timedelta(hours=12),
+        )
+    )
     await session.commit()

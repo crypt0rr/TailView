@@ -43,6 +43,7 @@ from .flow_data import (
 from .models import (
     AppUser,
     AuditEvent,
+    BackupVerification,
     Capability,
     Credential,
     Device,
@@ -63,6 +64,7 @@ from .models import (
     MfaRecoveryCode,
     NotificationDelivery,
     NotificationEndpoint,
+    OperationalJobRun,
     PolicySnapshot,
     PostureIntegration,
     ReportArtifact,
@@ -82,6 +84,7 @@ from .models import (
     TelemetryObservation,
     WebhookEndpoint,
 )
+from .operations import operations_summary, retention_snapshot, run_cleanup, storage_snapshot
 from .policy import (
     evaluate_device_postures,
     evaluate_policy,
@@ -3197,6 +3200,149 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
     return {
         "items": items,
         "navigation": navigation,
+    }
+
+
+@router.get("/operations/summary")
+async def operation_summary(_: Admin, db: Db) -> dict[str, Any]:
+    return await operations_summary(db)
+
+
+@router.get("/operations/storage")
+async def operation_storage(_: Admin, db: Db) -> dict[str, Any]:
+    return await storage_snapshot(db)
+
+
+@router.get("/operations/retention")
+async def operation_retention(_: Admin, db: Db) -> dict[str, Any]:
+    return await retention_snapshot(db)
+
+
+@router.post("/operations/cleanup/preview")
+async def operation_cleanup_preview(_: Admin, __: Csrf, db: Db) -> dict[str, Any]:
+    return await retention_snapshot(db)
+
+
+@router.post("/operations/cleanup/run")
+async def operation_cleanup_run(_: Admin, __: Csrf) -> dict[str, Any]:
+    try:
+        row = await run_cleanup("manual")
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "id": row.id,
+        "status": row.status,
+        "trigger": row.trigger,
+        "preview": row.preview,
+        "deleted": row.deleted,
+        "started_at": row.started_at,
+        "finished_at": row.finished_at,
+    }
+
+
+@router.get("/operations/jobs")
+async def operation_jobs(
+    _: Admin,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    job: str = Query("", max_length=64),
+    category: str = Query("", max_length=32),
+    status_filter: str = Query("", alias="status", max_length=32),
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> dict[str, Any]:
+    statement = select(OperationalJobRun)
+    if job:
+        statement = statement.where(OperationalJobRun.name == job)
+    if category:
+        statement = statement.where(OperationalJobRun.category == category)
+    if status_filter:
+        if status_filter not in {
+            "running",
+            "success",
+            "failed",
+            "partial_success",
+            "cancelled",
+            "skipped",
+            "lock_skipped",
+        }:
+            raise HTTPException(422, "Unsupported operational job status")
+        statement = statement.where(OperationalJobRun.status == status_filter)
+    if date_from:
+        statement = statement.where(OperationalJobRun.started_at >= date_from)
+    if date_to:
+        statement = statement.where(OperationalJobRun.started_at <= date_to)
+    cursor_data = decode_cursor(cursor, "operational-jobs")
+    if cursor_data:
+        started = datetime.fromisoformat(str(cursor_data["started_at"]))
+        row_id = str(cursor_data["id"])
+        statement = statement.where(
+            or_(
+                OperationalJobRun.started_at < started,
+                and_(OperationalJobRun.started_at == started, OperationalJobRun.id < row_id),
+            )
+        )
+    rows = (
+        await db.scalars(
+            statement.order_by(
+                OperationalJobRun.started_at.desc(), OperationalJobRun.id.desc()
+            ).limit(limit + 1)
+        )
+    ).all()
+    page = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit and page:
+        last = page[-1]
+        next_cursor = encode_cursor(
+            "operational-jobs", {"started_at": last.started_at.isoformat(), "id": last.id}
+        )
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "name": row.name,
+                "category": row.category,
+                "interval_seconds": row.interval_seconds,
+                "status": row.status,
+                "started_at": row.started_at,
+                "finished_at": row.finished_at,
+                "duration_ms": row.duration_ms,
+                "processed": row.processed,
+                "error_class": row.error_class,
+                "details": row.details,
+                "sync_job_id": row.sync_job_id,
+                "report_run_id": row.report_run_id,
+            }
+            for row in page
+        ],
+        "next_cursor": next_cursor,
+    }
+
+
+@router.get("/operations/backups")
+async def operation_backups(_: Admin, db: Db) -> dict[str, Any]:
+    rows = (
+        await db.scalars(
+            select(BackupVerification).order_by(BackupVerification.verified_at.desc()).limit(200)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "filename": row.filename,
+                "content_hash": row.content_hash,
+                "size": row.size,
+                "status": row.status,
+                "postgres_version": row.postgres_version,
+                "migration_revision": row.migration_revision,
+                "checks": row.checks,
+                "error_class": row.error_class,
+                "verified_at": row.verified_at,
+            }
+            for row in rows
+        ]
     }
 
 
