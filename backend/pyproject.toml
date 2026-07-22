@@ -5,7 +5,7 @@ description = "A read-only Tailscale tailnet observability dashboard"
 requires-python = ">=3.13"
 dependencies = [
   "alembic==1.16.4",
-  "apscheduler==3.11.0",
+  "apscheduler==3.11.3",
   "argon2-cffi==25.1.0",
   "cryptography==49.0.0",
   "fastapi==0.139.2",
