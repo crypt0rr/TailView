@@ -137,6 +137,29 @@ async def test_webhook_client_rejects_an_unexpected_collection_shape() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_keys_client_combines_typed_collections_without_requesting_secrets() -> None:
+    route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/keys")
+    route.mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "authKeys": [{"id": "tskey-auth-one"}],
+                "accessTokens": [{"id": "tskey-api-two"}],
+            },
+        )
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert await client.keys() == [
+        {"id": "tskey-auth-one"},
+        {"id": "tskey-api-two"},
+    ]
+    assert route.called
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_posture_and_feature_settings_use_read_only_paths() -> None:
     attributes = respx.get(
         "https://api.tailscale.com/api/v2/device/node%2Fone/attributes"

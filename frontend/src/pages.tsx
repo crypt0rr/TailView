@@ -68,6 +68,8 @@ import type {
   FlowRecord,
   FlowDeviceTraffic,
   FlowSummary,
+  GovernanceCredential,
+  GovernanceSummary,
   ObservedPhysicalEndpoint,
   Page,
   ServiceDetail,
@@ -308,6 +310,97 @@ export function trafficVolumeLabel(value: number) {
   }
   if (value > 0 && value < 1) return `${value.toFixed(1)} MB`;
   return `${Math.round(value)} MB`;
+}
+
+type GovernanceInvite = {
+  id: string; device_id: string; device_name: string; inviter_name: string | null;
+  recipient: string; status: string; created_at: string | null; expires_at: string | null;
+  stale: boolean;
+};
+type GovernanceContact = {
+  type: string; value: string; verified: boolean | null; stale: boolean; synced_at: string;
+};
+type GovernanceStream = {
+  log_type: string; enabled: boolean | null; destination_type: string; destination: string;
+  status: string; stale: boolean; synced_at: string;
+};
+
+export function AccessGovernance() {
+  const [tab, setTab] = useState<"credentials" | "invites" | "contacts" | "streams">("credentials");
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const summary = useQuery({
+    queryKey: ["access-governance"],
+    queryFn: () => request<GovernanceSummary>("/security/governance"),
+  });
+  const credentials = useInfiniteQuery({
+    queryKey: ["governance-credentials", search, typeFilter, statusFilter],
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams();
+      if (search) params.set("search", search);
+      if (typeFilter) params.set("credential_type", typeFilter);
+      if (statusFilter) params.set("status", statusFilter);
+      if (pageParam) params.set("cursor", pageParam);
+      return request<Page<GovernanceCredential>>(`/security/governance/credentials?${params}`);
+    },
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+  });
+  const invites = useQuery({
+    queryKey: ["governance-invites"],
+    queryFn: () => request<{ items: GovernanceInvite[] }>("/security/governance/invites"),
+  });
+  const contacts = useQuery({
+    queryKey: ["governance-contacts"],
+    queryFn: () => request<{ items: GovernanceContact[] }>("/security/governance/contacts"),
+  });
+  const streams = useQuery({
+    queryKey: ["governance-streams"],
+    queryFn: () => request<{ items: GovernanceStream[] }>("/security/governance/log-streaming"),
+  });
+  if (summary.isLoading) return <Loading />;
+  if (summary.error) return <ErrorState error={summary.error} />;
+  const data = summary.data!;
+  const capabilityStatus = (name: string) => data.capabilities[name]?.status ?? "unknown";
+  const credentialRows = credentials.data?.pages.flatMap((page) => page.items) ?? [];
+  const metrics = [
+    ["Credentials", data.counts.credentials], ["Active", data.counts.active_credentials],
+    ["Expiring ≤30d", data.counts.expiring_credentials], ["Pending invites", data.counts.pending_invites],
+    ["Verified contacts", data.counts.verified_contacts], ["Enabled streams", data.counts.enabled_streams],
+  ];
+  return <div className="page">
+    <PageHead eyebrow="SECURITY" title="Access governance" description="Read-only credential, invitation, contact, and log-stream metadata. Secret values are never requested." actions={<Badge tone={data.findings.some((item) => item.severity === "high") ? "danger" : "success"}>{data.findings.length} findings</Badge>} />
+    <div className="posture-metrics">{metrics.map(([label, value]) => <Card className="posture-metric" key={String(label)}><span>{label}</span><strong>{value}</strong></Card>)}</div>
+    <div className="notice-bar warning"><AlertTriangle /><span>{data.limitations.join(" ")}</span></div>
+    <Card className="table-card posture-findings">
+      <CardHead title="Conservative findings" detail="Reported metadata requiring administrator review" />
+      {data.findings.length ? <div className="security-findings governance-findings">{data.findings.map((finding) => <div className={`security-finding ${finding.severity}`} key={finding.id}><div className="security-finding-head"><div><Badge tone={finding.severity === "high" ? "danger" : "warning"}>{finding.severity}</Badge><span>{finding.kind.replaceAll("_", " ")}</span></div><code>{finding.label}</code></div><strong>{finding.message}</strong><p>{finding.remediation}</p></div>)}</div> : <Empty title="No governance findings" detail="No patterns covered by the conservative review were reported." />}
+    </Card>
+    <div className="tabs" role="tablist" aria-label="Governance inventory">{(["credentials", "invites", "contacts", "streams"] as const).map((value) => <button key={value} role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{value === "streams" ? "Log streaming" : value}</button>)}</div>
+    {tab === "credentials" && <>
+      <div className="filters-bar governance-filters">
+        <label className="search-field"><Search /><input aria-label="Search credentials" placeholder="Search description, creator, scope…" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
+        <select aria-label="Credential type" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option value="">All types</option><option value="auth_key">Auth keys</option><option value="api_access_token">API access tokens</option><option value="oauth_credential">OAuth credentials</option><option value="federated_credential">Federated credentials</option></select>
+        <select aria-label="Credential status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option><option value="active">Active</option><option value="expired">Expired</option><option value="revoked">Revoked</option><option value="stale">Stale</option><option value="inactive">Inactive</option></select>
+      </div>
+      <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Credential</th><th>Type</th><th>Status</th><th>Scopes / tags</th><th>Expires</th><th>Properties</th></tr></thead><tbody>{credentialRows.map((row) => <tr key={row.id}><td><strong>{row.description || "Unnamed credential"}</strong><small className="block"><code>{row.display_id}</code>{row.creator_id ? ` · ${row.creator_id}` : ""}</small></td><td>{row.type.replaceAll("_", " ")}</td><td><Badge tone={row.status === "active" ? "success" : row.status === "expired" || row.status === "revoked" ? "danger" : "warning"}>{row.status}</Badge></td><td><div className="tag-list">{[...row.scopes, ...row.tags].map((value) => <code key={value}>{value}</code>)}</div></td><td>{row.expires_at ? <><strong>{new Date(row.expires_at).toLocaleDateString()}</strong><small className="block">{relativeTime(row.expires_at)}</small></> : "Not reported"}</td><td><div className="tag-list">{row.reusable === true && <Badge tone="warning">reusable</Badge>}{row.ephemeral === true && <Badge>ephemeral</Badge>}{row.preapproved === true && <Badge>pre-approved</Badge>}</div></td></tr>)}</tbody></table></div>{!credentials.isLoading && !credentialRows.length && <Empty title="No credentials reported" detail={`Capability: ${capabilityStatus("credentials")}`} />}{credentials.hasNextPage && <div className="load-more"><Button variant="secondary" onClick={() => credentials.fetchNextPage()} disabled={credentials.isFetchingNextPage}>{credentials.isFetchingNextPage ? "Loading…" : "Load more"}</Button></div>}</Card>
+    </>}
+    {tab === "invites" && <GovernanceInvites rows={invites.data?.items ?? []} status={capabilityStatus("invites")} />}
+    {tab === "contacts" && <GovernanceContacts rows={contacts.data?.items ?? []} status={capabilityStatus("contacts")} />}
+    {tab === "streams" && <GovernanceStreams rows={streams.data?.items ?? []} status={capabilityStatus("log_streaming")} />}
+    <Card className="security-limitations"><CardHead title="Source coverage" detail="Each read surface synchronizes independently" /><div className="compact-list">{Object.entries(data.capabilities).map(([name, capability]) => <div key={name}><span><strong>{name.replaceAll("_", " ")}</strong><small className="block">{capability.required_scope}</small></span><Badge tone={capability.status === "available" ? "success" : "warning"}>{capability.status.replaceAll("_", " ")}</Badge></div>)}</div></Card>
+  </div>;
+}
+
+function GovernanceInvites({ rows, status }: { rows: GovernanceInvite[]; status: string }) {
+  return <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Recipient</th><th>Device</th><th>Inviter</th><th>Status</th><th>Created</th><th>Expires</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.recipient || "Not reported"}</td><td><Link to={`/devices?device=${encodeURIComponent(row.device_id)}`}>{row.device_name}</Link></td><td>{row.inviter_name || "Not reported"}</td><td><Badge tone={row.status === "pending" ? "warning" : "neutral"}>{row.status}</Badge>{row.stale && <small className="block">stale snapshot</small>}</td><td>{row.created_at ? relativeTime(row.created_at) : "Not reported"}</td><td>{row.expires_at ? new Date(row.expires_at).toLocaleDateString() : "Not reported"}</td></tr>)}</tbody></table></div>{!rows.length && <Empty title="No device invites" detail={`Capability: ${status}`} />}</Card>;
+}
+function GovernanceContacts({ rows, status }: { rows: GovernanceContact[]; status: string }) {
+  return <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Contact type</th><th>Value</th><th>Verification</th><th>Freshness</th></tr></thead><tbody>{rows.map((row) => <tr key={row.type}><td><strong>{row.type.replaceAll("_", " ")}</strong></td><td>{row.value || "Not reported"}</td><td><Badge tone={row.verified === true ? "success" : row.verified === false ? "warning" : "neutral"}>{row.verified === true ? "verified" : row.verified === false ? "unverified" : "not reported"}</Badge></td><td>{row.stale ? "Stale snapshot" : relativeTime(row.synced_at)}</td></tr>)}</tbody></table></div>{!rows.length && <Empty title="No contacts reported" detail={`Capability: ${status}`} />}</Card>;
+}
+function GovernanceStreams({ rows, status }: { rows: GovernanceStream[]; status: string }) {
+  return <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Log type</th><th>Enabled</th><th>Status</th><th>Destination type</th><th>Sanitized destination</th><th>Freshness</th></tr></thead><tbody>{rows.map((row) => <tr key={row.log_type}><td><strong>{row.log_type}</strong></td><td><Badge tone={row.enabled === true ? "success" : "neutral"}>{row.enabled === true ? "enabled" : row.enabled === false ? "disabled" : "not reported"}</Badge></td><td>{row.status}</td><td>{row.destination_type}</td><td><code>{row.destination || "Not reported"}</code></td><td>{row.stale ? "Stale snapshot" : relativeTime(row.synced_at)}</td></tr>)}</tbody></table></div>{!rows.length && <Empty title="No log-stream configuration" detail={`Capability: ${status}`} />}</Card>;
 }
 
 export function SecurityPosture() {

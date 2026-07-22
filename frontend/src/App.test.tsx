@@ -8,6 +8,7 @@ import * as apiModule from "./api";
 import { api } from "./api";
 import {
   AddressInventoryView,
+  AccessGovernance,
   DeviceTrafficRanking,
   DeviceTable,
   dnsConfigurationEntries,
@@ -27,16 +28,30 @@ describe("TailView", () => {
     expect("TailView").toMatch(/TailView/);
   });
 
-  it("moves only definitively unavailable capabilities out of active navigation", () => {
+  it("moves unavailable and successfully empty inventories out of active navigation", () => {
     const items = nav.filter(([label]) => ["Flows", "Services", "Devices"].includes(label));
-    const result = partitionNavigation(items, [
-      { name: "network_flow_logs", status: "plan_unavailable", requirement: "Premium", detail: "Not included", last_success: null },
-      { name: "services", status: "upstream_error", requirement: "all:read", detail: "Temporary failure", last_success: null },
-    ]);
+    const result = partitionNavigation(
+      items,
+      [
+        { name: "network_flow_logs", status: "plan_unavailable", requirement: "Premium", detail: "Not included", last_success: null },
+        { name: "services", status: "available", requirement: "all:read", detail: "Retrieved", last_success: null },
+      ],
+      {
+        "/services": {
+          count: 0,
+          evaluated: true,
+          in_use: false,
+          status: "not_configured",
+          detail: "Successfully synchronized; no Tailscale Services are currently configured.",
+          checked_at: "2026-07-22T10:00:00Z",
+        },
+      },
+    );
 
-    expect(result.active.map(([label]) => label)).toEqual(["Devices", "Services"]);
-    expect(result.inactive.map(({ item }) => item[0])).toEqual(["Flows"]);
+    expect(result.active.map(([label]) => label)).toEqual(["Devices"]);
+    expect(result.inactive.map(({ item }) => item[0])).toEqual(["Flows", "Services"]);
     expect(result.inactive[0]?.capability.detail).toBe("Not included");
+    expect(result.inactive[1]?.capability.status).toBe("not_configured");
   });
 
   it("keeps every reported split-DNS field visible in stable order", () => {
@@ -156,6 +171,35 @@ describe("TailView", () => {
     expect(screen.getByText("Current evidence only.")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Posture result filter"), { target: { value: "fail" } });
     await waitFor(() => expect(request.mock.calls.some(([path]) => String(path).includes("result=fail"))).toBe(true));
+    request.mockRestore();
+  });
+
+  it("shows administrator governance findings and sanitized credential metadata", async () => {
+    const request = vi.spyOn(apiModule, "request").mockImplementation(async (path) => {
+      if (path === "/security/governance") return {
+        counts: { credentials: 1, active_credentials: 1, expiring_credentials: 1, pending_invites: 0, verified_contacts: 1, enabled_streams: 1 },
+        findings: [{ id: "expiry:key", severity: "high", kind: "credential_expiring", record_type: "credential", record_id: "key", label: "CI key", message: "A credential expires soon.", remediation: "Rotate it.", evidence: {} }],
+        capabilities: {
+          credentials: { status: "available", detail: "", last_success: null, checked_at: null, required_scope: "all:read" },
+          invites: { status: "available", detail: "", last_success: null, checked_at: null, required_scope: "devices_invites:read" },
+          contacts: { status: "available", detail: "", last_success: null, checked_at: null, required_scope: "account_settings:read" },
+          log_streaming: { status: "available", detail: "", last_success: null, checked_at: null, required_scope: "log_streaming:read" },
+        },
+        freshness: {}, limitations: ["Secrets are never requested."],
+      } as never;
+      if (String(path).startsWith("/security/governance/credentials")) return { items: [{ id: "full-id", display_id: "tskey-auth-…123456", type: "auth_key", description: "CI key", creator_id: "Alice", scopes: ["all:read"], tags: ["tag:ci"], reusable: true, ephemeral: false, preapproved: true, created_at: null, expires_at: "2026-08-01T00:00:00Z", status: "active", present: true, stale: false, synced_at: "2026-07-22T00:00:00Z", provenance: "tailscale_keys_api" }], next_cursor: null } as never;
+      if (path === "/security/governance/invites" || path === "/security/governance/contacts" || path === "/security/governance/log-streaming") return { items: [] } as never;
+      throw new Error(`Unexpected request ${path}`);
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><MemoryRouter><AccessGovernance /></MemoryRouter></QueryClientProvider>);
+
+    expect(await screen.findByText("Access governance")).toBeTruthy();
+    expect(screen.getByText("A credential expires soon.")).toBeTruthy();
+    expect(await screen.findByText("tskey-auth-…123456")).toBeTruthy();
+    expect(screen.queryByText("full-id")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "contacts" }));
+    expect(await screen.findByText("No contacts reported")).toBeTruthy();
     request.mockRestore();
   });
 

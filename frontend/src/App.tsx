@@ -17,6 +17,7 @@ import {
   GitBranch,
   Globe2,
   LayoutDashboard,
+  KeyRound,
   LogOut,
   Menu,
   Moon,
@@ -47,6 +48,7 @@ import {
   SettingsPage,
   Services,
   SecurityPosture,
+  AccessGovernance,
   Topology,
 } from "./pages";
 
@@ -69,6 +71,7 @@ export const nav = [
   ["Tags", "/tags", Tags],
   ["Policy", "/policy", FileKey2],
   ["Security posture", "/security/posture", ShieldCheck],
+  ["Access governance", "/security/governance", KeyRound],
   ["Audit", "/audit", Shield],
   ["Sync jobs", "/sync", RefreshCw],
   ["DNS", "/dns", Globe2],
@@ -83,6 +86,15 @@ type CapabilityResult = {
   last_success: string | null;
 };
 
+type NavigationUsage = {
+  count: number;
+  evaluated: boolean;
+  in_use: boolean;
+  status: "active" | "not_configured";
+  detail: string;
+  checked_at: string | null;
+};
+
 const navigationCapabilities: Record<string, string> = {
   "/flows": "network_flow_logs",
   "/devices": "device_inventory",
@@ -92,9 +104,10 @@ const navigationCapabilities: Record<string, string> = {
   "/services": "services",
   "/exit-nodes": "routes",
   "/subnet-routers": "routes",
-  "/tags": "policy",
+  "/tags": "device_inventory",
   "/policy": "policy",
   "/security/posture": "device_posture",
+  "/security/governance": "access_governance",
   "/audit": "configuration_audit_logs",
   "/dns": "dns",
 };
@@ -109,6 +122,7 @@ const unavailableCapabilityStates = new Set([
 export function partitionNavigation(
   items: ReadonlyArray<(typeof nav)[number]>,
   capabilities: CapabilityResult[],
+  usage: Record<string, NavigationUsage> = {},
 ) {
   const byName = new Map(capabilities.map((capability) => [capability.name, capability]));
   const active: Array<(typeof nav)[number]> = [];
@@ -116,8 +130,20 @@ export function partitionNavigation(
   for (const item of items) {
     const capabilityName = navigationCapabilities[item[1]];
     const capability = capabilityName ? byName.get(capabilityName) : undefined;
+    const usageResult = usage[item[1]];
     if (capability && unavailableCapabilityStates.has(capability.status)) {
       inactive.push({ item, capability });
+    } else if (usageResult?.evaluated && !usageResult.in_use) {
+      inactive.push({
+        item,
+        capability: {
+          name: capabilityName ?? item[1],
+          status: usageResult.status,
+          requirement: "",
+          detail: usageResult.detail,
+          last_success: usageResult.checked_at,
+        },
+      });
     } else {
       active.push(item);
     }
@@ -311,14 +337,21 @@ export function Shell({
   const roleNav =
     user.role === "administrator"
       ? nav
-      : nav.filter(([label]) => label !== "DNS");
+      : nav.filter(([label]) => !["DNS", "Access governance"].includes(label));
   const capabilities = useQuery({
     queryKey: ["navigation-capabilities"],
-    queryFn: () => request<{ items: CapabilityResult[] }>("/capabilities"),
+    queryFn: () => request<{
+      items: CapabilityResult[];
+      navigation: Record<string, NavigationUsage>;
+    }>("/capabilities"),
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
-  const partitionedNav = partitionNavigation(roleNav, capabilities.data?.items ?? []);
+  const partitionedNav = partitionNavigation(
+    roleNav,
+    capabilities.data?.items ?? [],
+    capabilities.data?.navigation ?? {},
+  );
   const visibleNav = partitionedNav.active;
   const inactiveOpen = showInactive
     || partitionedNav.inactive.some(({ item }) => item[1] === location.pathname);
@@ -486,6 +519,16 @@ export function Shell({
             <Route path="/tags" element={<InventoryPage kind="tags" />} />
             <Route path="/policy" element={<Policy />} />
             <Route path="/security/posture" element={<SecurityPosture />} />
+            <Route
+              path="/security/governance"
+              element={
+                user.role === "administrator" ? (
+                  <AccessGovernance />
+                ) : (
+                  <Navigate to="/" replace />
+                )
+              }
+            />
             <Route path="/audit" element={<InventoryPage kind="audit" />} />
             <Route path="/sync" element={<InventoryPage kind="sync" />} />
             <Route

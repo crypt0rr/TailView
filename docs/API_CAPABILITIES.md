@@ -18,6 +18,10 @@ Validated against official documentation on **2026-07-21**. The official API/Ope
 | DNS configuration | `GET .../dns/preferences`, `/nameservers`, `/searchpaths`, `/split-dns` | `dns:read` | 5 min | Administrator-only DNS page with preferences, resolvers, search domains, split-DNS routing, freshness, and provenance |
 | Services | Official Services list/get/host/approval-status read methods | `all:read` (no granular Services scope is documented) | 5 min | First-class inventory when the endpoint is available; policy-only state otherwise |
 | Webhooks | `GET /api/v2/tailnet/{tailnet}/webhooks` | `webhooks:read` | 5 min | Administrator-only inventory with credentials and query values removed |
+| Credential inventory | `GET /api/v2/tailnet/{tailnet}/keys` | `all:read` or applicable granular key read scopes | 15 min | Administrator-only metadata with masked identifiers; no usable secrets |
+| Device invites | `GET /api/v2/device/{deviceID}/device-invites` | `devices_invites:read` | 15 min | Bounded per-device synchronization with last-good preservation |
+| Tailnet contacts | `GET /api/v2/tailnet/{tailnet}/contacts` | `account_settings:read` | 15 min | Administrator-only contact and explicit verification metadata |
+| Log streaming | `GET .../logging/{logType}/stream`, `GET .../logging/{logType}/status` | `log_streaming:read` | 15 min | Sanitized destination and status inventory; no configuration writes |
 
 Network logs have no pagination or maximum page size. Requests therefore use bounded inclusive RFC3339 windows, overlap recent time to capture delays, and deduplicate exact records. They are available upstream for 30 days, require eligible plans, and are client-reported. Configuration logs similarly use inclusive time windows without pagination and are retained upstream for 90 days.
 

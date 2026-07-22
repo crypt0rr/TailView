@@ -130,6 +130,55 @@ export interface SecurityPostureSummary {
   };
   limitations: string[];
 }
+export interface GovernanceSummary {
+  counts: {
+    credentials: number;
+    active_credentials: number;
+    expiring_credentials: number;
+    pending_invites: number;
+    verified_contacts: number;
+    enabled_streams: number;
+  };
+  findings: Array<{
+    id: string;
+    severity: string;
+    kind: string;
+    record_type: string;
+    record_id: string;
+    label: string;
+    message: string;
+    remediation: string;
+    evidence: Record<string, unknown>;
+  }>;
+  capabilities: Record<string, {
+    status: string;
+    detail: string;
+    last_success: string | null;
+    checked_at: string | null;
+    required_scope: string;
+  }>;
+  freshness: Record<string, number>;
+  limitations: string[];
+}
+export interface GovernanceCredential {
+  id: string;
+  display_id: string;
+  type: string;
+  description: string;
+  creator_id: string | null;
+  scopes: string[];
+  tags: string[];
+  reusable: boolean | null;
+  ephemeral: boolean | null;
+  preapproved: boolean | null;
+  created_at: string | null;
+  expires_at: string | null;
+  status: string;
+  present: boolean;
+  stale: boolean;
+  synced_at: string;
+  provenance: string;
+}
 export interface TailnetAddress {
   address: string;
   family: string;

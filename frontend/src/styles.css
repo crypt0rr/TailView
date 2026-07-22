@@ -709,6 +709,54 @@ aside nav .inactive-nav-item {
   font-size: 1.8rem;
 }
 
+.governance-filters,
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.governance-filters select,
+.tabs button {
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 7px 12px;
+}
+
+.tabs button.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+}
+
+.governance-findings {
+  padding: 14px;
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tag-list code {
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: var(--surface-soft);
+  color: var(--accent-bright);
+}
+
+.load-more {
+  display: flex;
+  justify-content: center;
+  padding: 14px;
+  border-top: 1px solid var(--border);
+}
+
 .coverage-bar {
   height: 10px;
   overflow: hidden;

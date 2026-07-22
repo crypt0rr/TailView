@@ -343,7 +343,30 @@ async def test_inventory_orchestrator_continues_after_one_source_fails(
     monkeypatch.setattr(sync_module, "sync_services", source("services"))
     monkeypatch.setattr(sync_module, "sync_dns", source("dns"))
     monkeypatch.setattr(sync_module, "sync_webhooks", source("webhooks"))
+    monkeypatch.setattr(sync_module, "sync_posture", source("posture"))
+    monkeypatch.setattr(
+        sync_module, "sync_posture_integrations", source("posture_integrations")
+    )
+    monkeypatch.setattr(sync_module, "sync_tailnet_settings", source("tailnet_settings"))
+    monkeypatch.setattr(sync_module, "sync_credentials", source("credentials"))
+    monkeypatch.setattr(sync_module, "sync_device_invites", source("device_invites"))
+    monkeypatch.setattr(sync_module, "sync_contacts", source("contacts"))
+    monkeypatch.setattr(sync_module, "sync_log_streaming", source("log_streaming"))
 
     await sync_module.sync_inventory()
 
-    assert calls == ["users", "devices", "routes", "services", "dns", "webhooks"]
+    assert calls == [
+        "users",
+        "devices",
+        "posture",
+        "routes",
+        "services",
+        "dns",
+        "webhooks",
+        "posture_integrations",
+        "tailnet_settings",
+        "credentials",
+        "device_invites",
+        "contacts",
+        "log_streaming",
+    ]

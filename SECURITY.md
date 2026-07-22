@@ -10,6 +10,8 @@ TailView treats the browser, upstream API responses, optional telemetry agent, r
 
 The integration is read-only. Administrators can configure credentials, metadata, schedules, and users; viewers cannot mutate application state. Tailscale secrets stay in the backend and are redacted from logs and raw diagnostic payloads.
 
+Access-governance synchronization stores only upstream credential metadata. Usable key and token values are never requested. Identifiers are masked in API responses and the UI; secret-bearing raw fields, authorization headers, URL credentials, and query values are removed before diagnostic persistence.
+
 ## Production requirements
 
 - Replace the setup token, encryption key, database password, and telemetry secret with independent random values.
@@ -26,4 +28,3 @@ The telemetry profile mounts the local Tailscale socket read-only. Socket access
 ## Supported versions
 
 Security fixes are applied to the latest tagged release. Until the first stable tag, only the current default branch is supported.
-
