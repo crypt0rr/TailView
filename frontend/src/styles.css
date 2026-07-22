@@ -175,6 +175,23 @@
   gap: 18px;
 }
 
+.operations-storage-grid {
+  align-items: start;
+}
+
+.operations-storage-card {
+  min-width: 0;
+}
+
+.managed-records-list .setting-row {
+  min-height: 50px;
+  padding: 12px 18px;
+}
+
+.managed-records-list .setting-row:first-child {
+  border-top: 0;
+}
+
 .operations-panel {
   min-width: 0;
   padding: 20px;

@@ -66,4 +66,25 @@ describe("operations center", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Run cleanup" }));
     await waitFor(() => expect(request).toHaveBeenCalledWith("/operations/cleanup/run", { method: "POST" }));
   });
+
+  it("keeps storage cards independently sized and relation tables contained", async () => {
+    vi.spyOn(apiModule, "request").mockImplementation(async (path) => {
+      if (path === "/operations/summary") return summary as never;
+      if (path === "/operations/storage") return {
+        database_bytes: 4096,
+        counts: { raw_flows: 1_841_626, findings: 14 },
+        relations: [{ name: "flows", total_bytes: 4096, table_bytes: 3072, index_bytes: 1024 }],
+        host_capacity_reported: false,
+      } as never;
+      throw new Error(`Unexpected request ${path}`);
+    });
+    renderOperations("/operations?tab=storage");
+
+    const managedHeading = await screen.findByRole("heading", { name: "Managed records" });
+    const relationsHeading = screen.getByRole("heading", { name: "PostgreSQL relations" });
+    expect(managedHeading.closest(".operations-storage-grid")).toBeTruthy();
+    expect(managedHeading.closest(".operations-storage-card")).toBeTruthy();
+    expect(relationsHeading.closest(".operations-storage-card")?.querySelector(".table-scroll"))
+      .toBeTruthy();
+  });
 });
