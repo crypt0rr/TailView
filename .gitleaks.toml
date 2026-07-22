@@ -1,6 +1,2 @@
 [extend]
 useDefault = true
-
-[[allowlists]]
-description = "The committed environment template contains documented public placeholders only."
-paths = ['''(?:^|/)\.env\.example$''']
