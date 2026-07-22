@@ -10,6 +10,8 @@ TailView is a self-hosted, read-only observability dashboard for a Tailscale tai
 - Device/user inventory with multi-role classification, routes, tags, local metadata, saved-view schema, and provenance.
 - A Security posture workspace with typed device attributes, expiry/freshness coverage, current-policy evaluation, conservative findings, feature settings, and redacted integration inventory.
 - Administrator-only access governance for credential metadata, device invites, tailnet contacts, log-stream status, expiry, and conservative review findings. TailView never requests usable secret values.
+- A durable Findings workspace consolidates policy, posture, expiry, governance, and repeated synchronization signals with acknowledgement, suppression, assignment, recurrence, automatic resolution, and immutable lifecycle history.
+- Optional signed JSON webhooks use an encrypted endpoint configuration and PostgreSQL outbox with idempotency, bounded retries, and SSRF-resistant destination validation.
 - Capability-aware navigation keeps active data sources prominent and groups definitively unavailable licensed/scoped features or successfully synchronized empty configuration inventories under a collapsible **Not in use** section. Services, routes, exit nodes, subnet routers, groups, and tags return automatically when synchronized data appears; transient failures and unprobed capabilities stay visible.
 - Interactive Cytoscape topology with observed and policy-permitted layers, layouts, filtering, selection, and a details drawer.
 - Flow explorer, reported-volume charts, CSV/JSON export, unresolved destinations, and virtual/subnet/exit/physical categories.
@@ -71,6 +73,8 @@ cd frontend && npm ci && npm run dev
 Python 3.13 is required for local backend work. The Docker build supplies the correct runtime when the host does not.
 
 `EXPORT_ROW_LIMIT` controls the maximum number of matching records in CSV and JSON exports and defaults to 10,000. Export responses include limit and truncation headers.
+
+Resolved findings and notification delivery history are retained for 180 days by default (`FINDINGS_RETENTION_DAYS`). Webhook destinations require public HTTPS in production. Private destinations must be explicitly constrained with `ALERT_WEBHOOK_HOST_ALLOWLIST`.
 
 ## Deployment
 

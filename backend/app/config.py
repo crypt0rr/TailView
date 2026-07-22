@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     posture_interval_seconds: int = 300
     security_settings_interval_seconds: int = 900
     governance_interval_seconds: int = 900
+    findings_interval_seconds: int = 300
+    findings_retention_days: int = 180
+    alert_webhook_host_allowlist: list[str] = []
     policy_interval_seconds: int = 300
     flow_interval_seconds: int = 60
     audit_interval_seconds: int = 300

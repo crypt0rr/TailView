@@ -12,6 +12,7 @@ import {
   DeviceTrafficRanking,
   DeviceTable,
   dnsConfigurationEntries,
+  Findings,
   PolicySecurityReview,
   SecurityPosture,
   dashboardMetricCards,
@@ -200,6 +201,37 @@ describe("TailView", () => {
     expect(screen.queryByText("full-id")).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: "contacts" }));
     expect(await screen.findByText("No contacts reported")).toBeTruthy();
+    request.mockRestore();
+  });
+
+  it("shows durable findings, filters, and lifecycle details", async () => {
+    const finding = {
+      id: "finding-1", source: "policy", category: "broad_access", severity: "high",
+      title: "Broad host access", summary: "A host can reach a broad destination.",
+      remediation: "Narrow the selector.", subject_type: "policy_rule",
+      subject_id: "public-reference", subject_display: "grants[0]", evidence: { path: "grants[0]" },
+      link_path: "/policy", status: "open", stale: false,
+      first_seen: "2026-07-22T08:00:00Z", last_seen: "2026-07-22T09:00:00Z",
+      last_evaluated: "2026-07-22T09:00:00Z", resolved_at: null,
+      acknowledged_at: null, suppressed_until: null, suppression_reason: "",
+      assigned_to: null, assignee: null, occurrence_count: 2,
+    };
+    const request = vi.spyOn(apiModule, "request").mockImplementation(async (path) => {
+      if (path === "/findings/summary") return { total: 1, open: 1, by_status: { open: 1 }, by_severity: { high: 1 }, open_by_severity: { high: 1 }, by_source: { policy: 1 }, generated_at: "2026-07-22T09:00:00Z" } as never;
+      if (String(path).startsWith("/findings?")) return { items: [finding], next_cursor: null } as never;
+      if (path === "/findings/finding-1") return { ...finding, transitions: [{ id: "transition-1", from_status: null, to_status: "open", actor_id: null, reason: "", occurred_at: "2026-07-22T08:00:00Z" }], occurrences: [] } as never;
+      throw new Error(`Unexpected request ${path}`);
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><MemoryRouter><Findings user={{ id: "viewer", username: "viewer", role: "viewer" }} /></MemoryRouter></QueryClientProvider>);
+
+    expect(await screen.findByText("Broad host access")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Finding severity"), { target: { value: "high" } });
+    await waitFor(() => expect(request.mock.calls.some(([path]) => String(path).includes("severity=high"))).toBe(true));
+    fireEvent.click(await screen.findByText("Broad host access"));
+    expect(await screen.findByText("Narrow the selector.")).toBeTruthy();
+    expect(screen.getByText("created → open")).toBeTruthy();
+    expect(screen.queryByText("Acknowledge")).toBeNull();
     request.mockRestore();
   });
 

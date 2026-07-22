@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from .config import Settings, get_settings
 from .db import SessionLocal, engine
+from .findings import cleanup_findings_job, deliver_notifications_job, evaluate_findings_job
 from .models import (
     AuditEvent,
     Capability,
@@ -550,9 +551,7 @@ SECURITY_SETTING_FIELDS = {
 }
 
 
-async def _tailnet_settings_worker(
-    session: AsyncSession, client: TailscaleClient
-) -> SourceResult:
+async def _tailnet_settings_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
     item = await client.tailnet_settings()
     await record_payload(session, "tailnet_settings", item)
     row = await session.get(TailnetSecuritySettings, "current") or TailnetSecuritySettings(
@@ -943,7 +942,9 @@ async def _credentials_worker(session: AsyncSession, client: TailscaleClient) ->
         row.creator_id = (
             str(creator.get("id") or creator.get("loginName") or "")
             if isinstance(creator, dict)
-            else str(creator) if creator else None
+            else str(creator)
+            if creator
+            else None
         )
         row.scopes = [str(value) for value in item.get("scopes", []) or []]
         capabilities = item.get("capabilities", {})
@@ -976,16 +977,13 @@ async def sync_credentials() -> None:
         capability_name="credential_inventory",
         capability_source="Tailscale keys API",
         requirement=(
-            "all:read or applicable auth_keys/api_access_tokens/oauth_keys/"
-            "federated_keys:read"
+            "all:read or applicable auth_keys/api_access_tokens/oauth_keys/federated_keys:read"
         ),
         worker=_credentials_worker,
     )
 
 
-async def _device_invites_worker(
-    session: AsyncSession, client: TailscaleClient
-) -> SourceResult:
+async def _device_invites_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
     devices = (await session.scalars(select(Device).where(Device.active.is_(True)))).all()
     await session.execute(update(DeviceInvite).values(stale=True))
     await session.commit()
@@ -1023,7 +1021,9 @@ async def _device_invites_worker(
             row.inviter_id = (
                 str(inviter.get("id") or inviter.get("loginName") or "")
                 if isinstance(inviter, dict)
-                else str(inviter) if inviter else None
+                else str(inviter)
+                if inviter
+                else None
             )
             row.recipient = (
                 str(recipient.get("loginName") or recipient.get("email") or "")
@@ -1102,9 +1102,7 @@ async def sync_contacts() -> None:
     )
 
 
-async def _log_streaming_worker(
-    session: AsyncSession, client: TailscaleClient
-) -> SourceResult:
+async def _log_streaming_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
     log_types = ("configuration", "network", "ssh")
     failures: Counter[str] = Counter()
     succeeded = 0
@@ -1497,5 +1495,32 @@ def create_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
         jitter=15,
+    )
+    scheduler.add_job(
+        evaluate_findings_job,
+        "interval",
+        seconds=settings.findings_interval_seconds,
+        id="findings",
+        max_instances=1,
+        coalesce=True,
+        jitter=15,
+    )
+    scheduler.add_job(
+        deliver_notifications_job,
+        "interval",
+        seconds=30,
+        id="notification-delivery",
+        max_instances=1,
+        coalesce=True,
+        jitter=5,
+    )
+    scheduler.add_job(
+        cleanup_findings_job,
+        "interval",
+        hours=24,
+        id="findings-cleanup",
+        max_instances=1,
+        coalesce=True,
+        jitter=300,
     )
     return scheduler

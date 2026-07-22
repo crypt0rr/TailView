@@ -179,6 +179,56 @@ export interface GovernanceCredential {
   synced_at: string;
   provenance: string;
 }
+export interface FindingSummary {
+  total: number;
+  open: number;
+  by_status: Record<string, number>;
+  by_severity: Record<string, number>;
+  open_by_severity: Record<string, number>;
+  by_source: Record<string, number>;
+  generated_at: string;
+}
+export interface FindingRecord {
+  id: string;
+  source: string;
+  category: string;
+  severity: "critical" | "high" | "medium" | "low" | "info";
+  title: string;
+  summary: string;
+  remediation: string;
+  subject_type: string;
+  subject_id: string;
+  subject_display: string;
+  evidence: Record<string, unknown>;
+  link_path: string;
+  status: "open" | "acknowledged" | "suppressed" | "resolved";
+  stale: boolean;
+  first_seen: string;
+  last_seen: string;
+  last_evaluated: string;
+  resolved_at: string | null;
+  acknowledged_at: string | null;
+  suppressed_until: string | null;
+  suppression_reason: string;
+  assigned_to: string | null;
+  assignee: string | null;
+  occurrence_count: number;
+  occurrences?: Array<{
+    id: string;
+    event_type: string;
+    severity: string;
+    evidence: Record<string, unknown>;
+    occurred_at: string;
+  }>;
+  transitions?: Array<{
+    id: string;
+    from_status: string | null;
+    to_status: string;
+    actor_id: string | null;
+    reason: string;
+    occurred_at: string;
+  }>;
+}
 export interface TailnetAddress {
   address: string;
   family: string;

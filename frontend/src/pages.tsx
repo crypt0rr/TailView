@@ -10,6 +10,7 @@ import cytoscape from "cytoscape";
 import {
   Activity,
   AlertTriangle,
+  BellRing,
   CheckCircle2,
   ChevronRight,
   CircleDot,
@@ -68,6 +69,8 @@ import type {
   FlowRecord,
   FlowDeviceTraffic,
   FlowSummary,
+  FindingRecord,
+  FindingSummary,
   GovernanceCredential,
   GovernanceSummary,
   ObservedPhysicalEndpoint,
@@ -125,6 +128,23 @@ export function Dashboard() {
         ))}
       </div>
       <div className="dashboard-grid">
+        <Card className="findings-dashboard-card wide">
+          <CardHead
+            title="Findings"
+            detail="Durable security and operational signals"
+            action={<Link to="/findings">Open workspace <ChevronRight /></Link>}
+          />
+          <div className="findings-dashboard-summary">
+            <strong>{d.findings?.open ?? 0}</strong>
+            <span>active</span>
+            <Badge tone={(d.findings?.critical ?? 0) > 0 ? "danger" : "neutral"}>
+              {d.findings?.critical ?? 0} critical
+            </Badge>
+            <Badge tone={(d.findings?.high ?? 0) > 0 ? "warning" : "neutral"}>
+              {d.findings?.high ?? 0} high
+            </Badge>
+          </div>
+        </Card>
         <Card className="chart-card wide">
           <CardHead
             title="Network activity"
@@ -216,6 +236,170 @@ export function Dashboard() {
       </div>
     </div>
   );
+}
+
+type FindingsUser = { id: string; username: string; role: "administrator" | "viewer" };
+type NotificationEndpointView = {
+  id: string; name: string; url: string; minimum_severity: string; sources: string[];
+  include_resolved: boolean; enabled: boolean; created_at: string; updated_at: string;
+};
+type NotificationDeliveryView = {
+  id: string; endpoint_id: string; event_type: string; status: string;
+  attempt_count: number; http_status: number | null; error_class: string;
+  created_at: string; delivered_at: string | null;
+};
+
+export function Findings({ user }: { user: FindingsUser }) {
+  const [params, setParams] = useSearchParams();
+  const [selectedId, setSelectedId] = useState(params.get("finding") ?? "");
+  const [tab, setTab] = useState<"findings" | "notifications">("findings");
+  const [endpointForm, setEndpointForm] = useState({
+    name: "", url: "", minimum_severity: "high", sources: "", include_resolved: false,
+  });
+  const [newSecret, setNewSecret] = useState("");
+  const [suppressionDuration, setSuppressionDuration] = useState("24h");
+  const queryClient = useQueryClient();
+  const filterKeys = ["status", "severity", "source", "category", "subject", "assigned_to", "search"] as const;
+  const filters = Object.fromEntries(filterKeys.map((key) => [key, params.get(key) ?? ""]));
+  const setFilter = (key: string, value: string) => setParams((current) => {
+    const next = new URLSearchParams(current);
+    if (value) next.set(key, value); else next.delete(key);
+    next.delete("finding");
+    return next;
+  });
+  const queryString = new URLSearchParams(
+    Object.entries(filters).filter(([, value]) => Boolean(value)),
+  ).toString();
+  const summary = useQuery({
+    queryKey: ["findings-summary"],
+    queryFn: () => request<FindingSummary>("/findings/summary"),
+    refetchInterval: 60_000,
+  });
+  const findings = useInfiniteQuery({
+    queryKey: ["findings", filters],
+    queryFn: ({ pageParam }) => {
+      const next = new URLSearchParams(queryString);
+      if (pageParam) next.set("cursor", pageParam);
+      return request<Page<FindingRecord>>(`/findings?${next}`);
+    },
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+  });
+  const detail = useQuery({
+    queryKey: ["finding", selectedId],
+    queryFn: () => request<FindingRecord>(`/findings/${selectedId}`),
+    enabled: Boolean(selectedId),
+  });
+  const endpoints = useQuery({
+    queryKey: ["finding-endpoints"],
+    queryFn: () => request<{ items: NotificationEndpointView[] }>("/findings/notification-endpoints"),
+    enabled: user.role === "administrator" && tab === "notifications",
+  });
+  const deliveries = useQuery({
+    queryKey: ["finding-deliveries"],
+    queryFn: () => request<{ items: NotificationDeliveryView[] }>("/findings/notification-deliveries"),
+    enabled: user.role === "administrator" && tab === "notifications",
+  });
+  const assignees = useQuery({
+    queryKey: ["finding-assignees"],
+    queryFn: () => request<{ items: Array<{ id: string; username: string; role: string }> }>("/findings/assignees"),
+    enabled: user.role === "administrator",
+  });
+  const refresh = () => Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["findings"] }),
+    queryClient.invalidateQueries({ queryKey: ["finding"] }),
+    queryClient.invalidateQueries({ queryKey: ["findings-summary"] }),
+  ]);
+  const action = useMutation({
+    mutationFn: ({ path, body }: { path: string; body: Record<string, unknown> }) =>
+      request(`/findings/${selectedId}/${path}`, { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: refresh,
+  });
+  const createEndpoint = useMutation({
+    mutationFn: () => request<{ signing_secret: string }>("/findings/notification-endpoints", {
+      method: "POST",
+      body: JSON.stringify({
+        ...endpointForm,
+        sources: endpointForm.sources.split(",").map((value) => value.trim()).filter(Boolean),
+        enabled: true,
+      }),
+    }),
+    onSuccess: (created) => {
+      setNewSecret(created.signing_secret);
+      setEndpointForm({ name: "", url: "", minimum_severity: "high", sources: "", include_resolved: false });
+      queryClient.invalidateQueries({ queryKey: ["finding-endpoints"] });
+    },
+  });
+  const endpointAction = useMutation({
+    mutationFn: ({ id, operation }: { id: string; operation: "test" | "disable" }) =>
+      request(`/findings/notification-endpoints/${id}${operation === "test" ? "/test" : ""}`, {
+        method: operation === "test" ? "POST" : "DELETE",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["finding-endpoints"] });
+      queryClient.invalidateQueries({ queryKey: ["finding-deliveries"] });
+    },
+  });
+  const rows = findings.data?.pages.flatMap((page) => page.items) ?? [];
+  if (summary.isLoading) return <Loading />;
+  if (summary.error) return <ErrorState error={summary.error} />;
+  const totals = summary.data!;
+  const openFinding = (id: string) => {
+    setSelectedId(id);
+    setParams((current) => { const next = new URLSearchParams(current); next.set("finding", id); return next; });
+  };
+  const closeFinding = () => {
+    setSelectedId("");
+    setParams((current) => { const next = new URLSearchParams(current); next.delete("finding"); return next; });
+  };
+  const promptReason = (label: string) => window.prompt(`${label} reason (optional)`, "") ?? null;
+  return <div className="page findings-page">
+    <PageHead eyebrow="SECURITY & OPERATIONS" title="Findings" description="Durable signals with recurrence, acknowledgement, suppression, and resolution history." actions={<Badge tone={totals.open ? "warning" : "success"}>{totals.open} active</Badge>} />
+    {user.role === "administrator" && <div className="tabs" role="tablist" aria-label="Findings workspace"><button className={tab === "findings" ? "active" : ""} onClick={() => setTab("findings")}>Findings</button><button className={tab === "notifications" ? "active" : ""} onClick={() => setTab("notifications")}>Notifications</button></div>}
+    {tab === "findings" && <>
+      <div className="posture-metrics findings-metrics">
+        {(["open", "acknowledged", "suppressed", "resolved"] as const).map((status) => <Card className="posture-metric" key={status}><span>{status}</span><strong>{totals.by_status[status] ?? 0}</strong></Card>)}
+        <Card className="posture-metric urgent"><span>Critical / high</span><strong>{(totals.by_severity.critical ?? 0) + (totals.by_severity.high ?? 0)}</strong></Card>
+      </div>
+      <div className="filters-bar governance-filters">
+        <label className="search-field"><Search /><input aria-label="Search findings" placeholder="Search findings…" value={filters.search} onChange={(event) => setFilter("search", event.target.value)} /></label>
+        <select aria-label="Finding status" value={filters.status} onChange={(event) => setFilter("status", event.target.value)}><option value="">All statuses</option>{["open", "acknowledged", "suppressed", "resolved"].map((value) => <option key={value}>{value}</option>)}</select>
+        <select aria-label="Finding severity" value={filters.severity} onChange={(event) => setFilter("severity", event.target.value)}><option value="">All severities</option>{["critical", "high", "medium", "low", "info"].map((value) => <option key={value}>{value}</option>)}</select>
+        <select aria-label="Finding source" value={filters.source} onChange={(event) => setFilter("source", event.target.value)}><option value="">All sources</option>{Object.keys(totals.by_source).map((value) => <option key={value}>{value}</option>)}</select>
+        <input aria-label="Finding category" placeholder="Category" value={filters.category} onChange={(event) => setFilter("category", event.target.value)} />
+        <input aria-label="Finding subject" placeholder="Subject" value={filters.subject} onChange={(event) => setFilter("subject", event.target.value)} />
+        {user.role === "administrator" && <select aria-label="Finding assignment" value={filters.assigned_to} onChange={(event) => setFilter("assigned_to", event.target.value)}><option value="">All assignments</option><option value="unassigned">Unassigned</option>{assignees.data?.items.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.username}</option>)}</select>}
+      </div>
+      <Card className="table-card">
+        <div className="table-scroll"><table><thead><tr><th>Severity</th><th>Finding</th><th>Subject</th><th>Source</th><th>Status</th><th>Last seen</th><th>Recurrences</th></tr></thead><tbody>{rows.map((finding) => <tr key={finding.id} className="clickable-row" onClick={() => openFinding(finding.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openFinding(finding.id); }}><td><Badge tone={finding.severity === "critical" || finding.severity === "high" ? "danger" : finding.severity === "medium" ? "warning" : "neutral"}>{finding.severity}</Badge></td><td><strong>{finding.title}</strong>{finding.stale && <small className="block">stale evaluation</small>}</td><td>{finding.subject_display}</td><td>{finding.source.replaceAll("_", " ")}</td><td><Badge tone={finding.status === "open" ? "warning" : finding.status === "resolved" ? "success" : "neutral"}>{finding.status}</Badge></td><td>{relativeTime(finding.last_seen)}</td><td>{finding.occurrence_count}</td></tr>)}</tbody></table></div>
+        {!findings.isLoading && !rows.length && <Empty title="No findings" detail="No signals match these filters. Zero active findings is a meaningful healthy state." icon={<ShieldCheck />} />}
+        {findings.hasNextPage && <div className="load-more"><Button variant="secondary" onClick={() => findings.fetchNextPage()} disabled={findings.isFetchingNextPage}>{findings.isFetchingNextPage ? "Loading…" : "Load more"}</Button></div>}
+      </Card>
+    </>}
+    {tab === "notifications" && user.role === "administrator" && <div className="notification-grid">
+      <Card className="notification-form-card"><CardHead title="Signed webhook" detail="Public HTTPS by default; secrets are shown once." />
+        {newSecret && <div className="notice-bar warning"><AlertTriangle /><span>Copy this signing secret now: <code>{newSecret}</code></span></div>}
+        <form className="settings-form" onSubmit={(event) => { event.preventDefault(); createEndpoint.mutate(); }}>
+          <label>Name<input required value={endpointForm.name} onChange={(event) => setEndpointForm({ ...endpointForm, name: event.target.value })} /></label>
+          <label>HTTPS URL<input required type="url" value={endpointForm.url} onChange={(event) => setEndpointForm({ ...endpointForm, url: event.target.value })} /></label>
+          <label>Minimum severity<select value={endpointForm.minimum_severity} onChange={(event) => setEndpointForm({ ...endpointForm, minimum_severity: event.target.value })}>{["critical", "high", "medium", "low", "info"].map((value) => <option key={value}>{value}</option>)}</select></label>
+          <label>Source filters (comma-separated)<input placeholder="policy, posture" value={endpointForm.sources} onChange={(event) => setEndpointForm({ ...endpointForm, sources: event.target.value })} /></label>
+          <label className="checkbox"><input type="checkbox" checked={endpointForm.include_resolved} onChange={(event) => setEndpointForm({ ...endpointForm, include_resolved: event.target.checked })} /> Include resolved events</label>
+          {createEndpoint.error && <ErrorState error={createEndpoint.error} />}
+          <Button disabled={createEndpoint.isPending}>{createEndpoint.isPending ? "Validating…" : "Create endpoint"}</Button>
+        </form>
+      </Card>
+      <Card className="table-card"><CardHead title="Endpoints" detail="URLs are sanitized after storage." /><div className="compact-list">{endpoints.data?.items.map((endpoint) => <div key={endpoint.id}><span><strong>{endpoint.name}</strong><small className="block"><code>{endpoint.url}</code> · {endpoint.minimum_severity}+{endpoint.sources.length ? ` · ${endpoint.sources.join(", ")}` : ""}</small></span><Badge tone={endpoint.enabled ? "success" : "neutral"}>{endpoint.enabled ? "enabled" : "disabled"}</Badge><Button variant="ghost" onClick={() => endpointAction.mutate({ id: endpoint.id, operation: "test" })} disabled={!endpoint.enabled}>Test</Button>{endpoint.enabled && <Button variant="ghost" onClick={() => endpointAction.mutate({ id: endpoint.id, operation: "disable" })}>Disable</Button>}</div>)}</div>{!endpoints.isLoading && !endpoints.data?.items.length && <Empty title="No notification endpoints" detail="In-app findings remain available without outbound delivery." />}</Card>
+      <Card className="table-card notification-history"><CardHead title="Delivery history" detail="Response bodies and credentials are never stored." /><div className="table-scroll"><table><thead><tr><th>Event</th><th>Status</th><th>Attempts</th><th>HTTP</th><th>Created</th></tr></thead><tbody>{deliveries.data?.items.map((delivery) => <tr key={delivery.id}><td>{delivery.event_type}</td><td><Badge tone={delivery.status === "delivered" ? "success" : delivery.status === "failed" ? "danger" : "neutral"}>{delivery.status}</Badge></td><td>{delivery.attempt_count}</td><td>{delivery.http_status ?? delivery.error_class ?? "—"}</td><td>{relativeTime(delivery.created_at)}</td></tr>)}</tbody></table></div></Card>
+    </div>}
+    {selectedId && <><button className="drawer-backdrop" aria-label="Close finding details" onClick={closeFinding} /><aside className="drawer finding-drawer" aria-label="Finding details">{detail.isLoading ? <Loading /> : detail.error ? <ErrorState error={detail.error} /> : detail.data && <><div className="drawer-head"><div className="large-node-icon"><BellRing /></div><div><small>{detail.data.severity} finding</small><h2>{detail.data.title}</h2><Badge tone={detail.data.status === "open" ? "warning" : detail.data.status === "resolved" ? "success" : "neutral"}>{detail.data.status}</Badge></div><button className="icon-button" aria-label="Close" onClick={closeFinding}><X /></button></div><div className="drawer-body">
+      <section className="detail-group"><h3>Summary</h3><p>{detail.data.summary}</p><div className="detail-row"><span>Subject</span><strong>{detail.data.subject_display}</strong></div><div className="detail-row"><span>Source</span><strong>{detail.data.source.replaceAll("_", " ")}</strong></div><div className="detail-row"><span>First / last seen</span><strong>{relativeTime(detail.data.first_seen)} / {relativeTime(detail.data.last_seen)}</strong></div>{detail.data.stale && <div className="notice-bar warning"><Clock3 /><span>The latest source evaluation was incomplete; this finding was retained as stale.</span></div>}</section>
+      <section className="detail-group"><h3>Remediation</h3><p>{detail.data.remediation}</p>{detail.data.link_path && <Link to={detail.data.link_path}>Open related record <ChevronRight /></Link>}</section>
+      <section className="detail-group"><h3>Safe evidence</h3><pre className="evidence-block">{JSON.stringify(detail.data.evidence, null, 2)}</pre></section>
+      <section className="detail-group"><h3>Lifecycle</h3><div className="finding-timeline">{detail.data.transitions?.map((transition) => <div key={transition.id}><i /><span><strong>{transition.from_status ?? "created"} → {transition.to_status}</strong><small className="block">{relativeTime(transition.occurred_at)}{transition.reason ? ` · ${transition.reason}` : ""}</small></span></div>)}</div></section>
+      {user.role === "administrator" && <section className="detail-group"><h3>Actions</h3><label className="assignment-field">Assignment<select aria-label="Assign finding" value={detail.data.assigned_to ?? ""} onChange={(event) => action.mutate({ path: "assign", body: { user_id: event.target.value || null } })}><option value="">Unassigned</option>{assignees.data?.items.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.username}</option>)}</select></label><div className="finding-actions">{detail.data.status !== "resolved" && <Button variant="secondary" onClick={() => { const reason = promptReason("Acknowledge"); if (reason !== null) action.mutate({ path: "acknowledge", body: { reason } }); }}>Acknowledge</Button>}{detail.data.status === "resolved" && <Button variant="secondary" onClick={() => { const reason = promptReason("Reopen"); if (reason !== null) action.mutate({ path: "reopen", body: { reason } }); }}>Reopen</Button>}{detail.data.status === "suppressed" ? <Button variant="secondary" onClick={() => action.mutate({ path: "unsuppress", body: { reason: "Unsuppressed by administrator" } })}>Unsuppress</Button> : detail.data.status !== "resolved" && <><select aria-label="Suppression duration" value={suppressionDuration} onChange={(event) => setSuppressionDuration(event.target.value)}>{["1h", "24h", "7d", "30d", "indefinite"].map((duration) => <option key={duration} value={duration}>{duration === "indefinite" ? "Indefinitely" : duration}</option>)}</select><Button variant="secondary" onClick={() => { const reason = window.prompt("Suppression reason"); if (reason) action.mutate({ path: "suppress", body: { duration: suppressionDuration, reason } }); }}>Suppress</Button></>}</div>{action.error && <ErrorState error={action.error} />}</section>}
+    </div></>}</aside></>}
+  </div>;
 }
 
 export function dashboardMetricCards(d: Record<string, any>) {

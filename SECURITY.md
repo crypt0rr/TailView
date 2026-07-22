@@ -12,6 +12,10 @@ The integration is read-only. Administrators can configure credentials, metadata
 
 Access-governance synchronization stores only upstream credential metadata. Usable key and token values are never requested. Identifiers are masked in API responses and the UI; secret-bearing raw fields, authorization headers, URL credentials, and query values are removed before diagnostic persistence.
 
+Finding webhooks are outbound TailView actions and do not modify the tailnet. Full endpoint URLs and HMAC signing secrets are encrypted with the deployment master key; only sanitized URLs are displayed. Payloads contain safe summaries and public references, not raw evidence or upstream secret-bearing identifiers. Production destinations must use HTTPS, redirects are not followed, and DNS results are rejected when they resolve to loopback, private, link-local, multicast, or reserved addresses unless an exact hostname or CIDR is explicitly allowlisted. Keep `ALERT_WEBHOOK_HOST_ALLOWLIST` empty unless a reviewed private receiver is required.
+
+Receivers should verify `X-TailView-Timestamp` and `X-TailView-Signature` against the exact request body, reject stale timestamps, and deduplicate by `X-TailView-Event-ID` or `Idempotency-Key`. The signing secret is shown only once at endpoint creation.
+
 ## Production requirements
 
 - Replace the setup token, encryption key, database password, and telemetry secret with independent random values.

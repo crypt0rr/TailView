@@ -53,3 +53,25 @@ class CapabilityResponse(BaseModel):
     detail: str
     last_success: datetime | None
     checked_at: datetime
+
+
+class FindingActionRequest(BaseModel):
+    reason: str = Field(default="", max_length=1000)
+
+
+class FindingSuppressRequest(BaseModel):
+    duration: Literal["1h", "24h", "7d", "30d", "indefinite"]
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class FindingAssignRequest(BaseModel):
+    user_id: str | None = Field(default=None, max_length=36)
+
+
+class NotificationEndpointRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    url: str = Field(min_length=8, max_length=2048)
+    minimum_severity: Literal["critical", "high", "medium", "low", "info"] = "high"
+    sources: list[str] = Field(default_factory=list, max_length=32)
+    include_resolved: bool = False
+    enabled: bool = True

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import io
 import json
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -23,6 +24,11 @@ from .addresses import (
 from .config import Settings, get_settings
 from .db import get_db
 from .demo import seed_demo
+from .findings import (
+    SEVERITY_ORDER,
+    evaluate_findings_job,
+    validate_webhook_url,
+)
 from .flow_data import (
     FlowFilters,
     apply_flow_filters,
@@ -44,9 +50,14 @@ from .models import (
     DevicePostureAttribute,
     DevicePostureState,
     DnsConfiguration,
+    Finding,
+    FindingOccurrence,
+    FindingTransition,
     Flow,
     LocalMetadata,
     LogStreamingConfiguration,
+    NotificationDelivery,
+    NotificationEndpoint,
     PolicySnapshot,
     PostureIntegration,
     ServiceEndpoint,
@@ -68,8 +79,18 @@ from .policy import (
     security_review_policy,
     source_line,
 )
-from .schemas import CredentialRequest, LoginRequest, MetadataUpdate, SetupRequest, UserResponse
-from .security import SecretBox
+from .schemas import (
+    CredentialRequest,
+    FindingActionRequest,
+    FindingAssignRequest,
+    FindingSuppressRequest,
+    LoginRequest,
+    MetadataUpdate,
+    NotificationEndpointRequest,
+    SetupRequest,
+    UserResponse,
+)
+from .security import SecretBox, new_token
 from .sync import (
     sync_contacts,
     sync_credentials,
@@ -156,8 +177,7 @@ def _posture_applicable(device: Device) -> bool:
     if "subnet_router" in (device.roles or []):
         return False
     return not any(
-        raw.get(key)
-        for key in ("isExternal", "isShared", "shared", "sharedTo", "sharedWith")
+        raw.get(key) for key in ("isExternal", "isShared", "shared", "sharedTo", "sharedWith")
     )
 
 
@@ -216,9 +236,7 @@ async def _posture_payload(
     for result in results:
         for assertion in result["assertions"]:
             lines = (
-                source_line(snapshot.hujson, assertion["condition"])
-                if snapshot
-                else (None, None)
+                source_line(snapshot.hujson, assertion["condition"]) if snapshot else (None, None)
             )
             assertion["source_lines"] = {"start": lines[0], "end": lines[1]}
     usage: dict[str, list[dict[str, Any]]] = {}
@@ -267,8 +285,7 @@ async def _posture_payload(
                 elif "pass" in statuses:
                     status_value = "pass"
                 elif any(
-                    status in {"incomplete_data", "unsupported_condition"}
-                    for status in statuses
+                    status in {"incomplete_data", "unsupported_condition"} for status in statuses
                 ):
                     status_value = "incomplete_data"
                 else:
@@ -410,7 +427,7 @@ async def logout(
 
 @router.get("/dashboard")
 async def dashboard(
-    _: Authed,
+    user: Authed,
     db: Db,
     hours: int = Query(24),
 ) -> dict[str, Any]:
@@ -448,6 +465,15 @@ async def dashboard(
     top_pairs = (await db.execute(top_pairs_query.order_by(desc("bytes")).limit(5))).all()
     traffic_series = await flow_summary_series(db, filters, now=now)
     labels = await device_label_map(db)
+    finding_query = select(Finding.severity, func.count()).where(
+        Finding.status.in_(["open", "acknowledged"])
+    )
+    if user.role != "administrator":
+        finding_query = finding_query.where(Finding.visibility == "viewer")
+    finding_counts = {
+        severity: int(count)
+        for severity, count in (await db.execute(finding_query.group_by(Finding.severity))).all()
+    }
     return {
         "devices": device_count,
         "online": online,
@@ -471,6 +497,11 @@ async def dashboard(
         "range_hours": hours,
         "generated_at": now,
         "traffic_label": "Reported bytes; peer reports may overlap",
+        "findings": {
+            "open": sum(finding_counts.values()),
+            "critical": finding_counts.get("critical", 0),
+            "high": finding_counts.get("high", 0),
+        },
     }
 
 
@@ -584,9 +615,7 @@ async def devices(
         if cursor_data:
             key = (str(cursor_data.get("name", "")), str(cursor_data.get("id", "")))
             items = [
-                item
-                for item in items
-                if (str(item["name"]).casefold(), str(item["id"])) > key
+                item for item in items if (str(item["name"]).casefold(), str(item["id"])) > key
             ]
         page = items[:limit]
         next_cursor = None
@@ -1677,14 +1706,10 @@ async def audit(_: Authed, db: Db, limit: int = Query(100, ge=1, le=500)) -> dic
 async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
     rows = (await db.execute(select(Capability).order_by(Capability.name))).scalars().all()
     capability_by_name = {row.name: row for row in rows}
-    active_devices = (
-        await db.scalars(select(Device).where(Device.active.is_(True)))
-    ).all()
+    active_devices = (await db.scalars(select(Device).where(Device.active.is_(True)))).all()
     service_count = (
         await db.scalar(
-            select(func.count())
-            .select_from(TailnetService)
-            .where(TailnetService.present.is_(True))
+            select(func.count()).select_from(TailnetService).where(TailnetService.present.is_(True))
         )
     ) or 0
     snapshot = await db.scalar(
@@ -1728,7 +1753,9 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
     governance_count = (
         int(
             await db.scalar(
-                select(func.count()).select_from(TailnetCredential).where(TailnetCredential.present.is_(True))
+                select(func.count())
+                .select_from(TailnetCredential)
+                .where(TailnetCredential.present.is_(True))
             )
             or 0
         )
@@ -1740,7 +1767,9 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
         )
         + int(
             await db.scalar(
-                select(func.count()).select_from(TailnetContact).where(TailnetContact.present.is_(True))
+                select(func.count())
+                .select_from(TailnetContact)
+                .where(TailnetContact.present.is_(True))
             )
             or 0
         )
@@ -1789,17 +1818,17 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
             "checked_at": capability.checked_at if capability else None,
         }
     items = [
-            {
-                "name": c.name,
-                "status": c.status,
-                "source": c.source,
-                "requirement": c.requirement,
-                "detail": c.detail,
-                "last_success": c.last_success,
-                "checked_at": c.checked_at,
-            }
-            for c in rows
-        ]
+        {
+            "name": c.name,
+            "status": c.status,
+            "source": c.source,
+            "requirement": c.requirement,
+            "detail": c.detail,
+            "last_success": c.last_success,
+            "checked_at": c.checked_at,
+        }
+        for c in rows
+    ]
     if governance_rows:
         unavailable = {"permission_denied", "feature_disabled", "plan_unavailable", "unsupported"}
         aggregate_status = (
@@ -1854,6 +1883,467 @@ async def sync_jobs(_: Authed, db: Db) -> dict[str, Any]:
             for j in rows
         ]
     }
+
+
+def _finding_visible(user: AppUser, finding: Finding) -> bool:
+    return user.role == "administrator" or finding.visibility == "viewer"
+
+
+def _finding_dict(finding: Finding, assignee: AppUser | None = None) -> dict[str, Any]:
+    return {
+        "id": finding.id,
+        "source": finding.source,
+        "category": finding.category,
+        "severity": finding.severity,
+        "title": finding.title,
+        "summary": finding.summary,
+        "remediation": finding.remediation,
+        "subject_type": finding.subject_type,
+        "subject_id": finding.subject_id,
+        "subject_display": finding.subject_display,
+        "evidence": finding.evidence,
+        "link_path": finding.link_path,
+        "status": finding.status,
+        "stale": finding.stale,
+        "first_seen": finding.first_seen,
+        "last_seen": finding.last_seen,
+        "last_evaluated": finding.last_evaluated,
+        "resolved_at": finding.resolved_at,
+        "acknowledged_at": finding.acknowledged_at,
+        "suppressed_until": finding.suppressed_until,
+        "suppression_reason": finding.suppression_reason,
+        "assigned_to": finding.assigned_to,
+        "assignee": assignee.username if assignee else None,
+        "occurrence_count": finding.occurrence_count,
+    }
+
+
+@router.get("/findings/summary")
+async def findings_summary(user: Authed, db: Db) -> dict[str, Any]:
+    visibility = [] if user.role == "administrator" else [Finding.visibility == "viewer"]
+    rows = (
+        await db.execute(
+            select(Finding.status, Finding.severity, Finding.source, func.count())
+            .where(*visibility)
+            .group_by(Finding.status, Finding.severity, Finding.source)
+        )
+    ).all()
+    by_status: dict[str, int] = {}
+    by_severity: dict[str, int] = {}
+    open_by_severity: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    for status_value, severity, source, count in rows:
+        by_status[status_value] = by_status.get(status_value, 0) + int(count)
+        if status_value != "resolved":
+            by_severity[severity] = by_severity.get(severity, 0) + int(count)
+            by_source[source] = by_source.get(source, 0) + int(count)
+        if status_value == "open":
+            open_by_severity[severity] = open_by_severity.get(severity, 0) + int(count)
+    return {
+        "total": sum(by_status.values()),
+        "open": sum(
+            count for status_value, count in by_status.items() if status_value != "resolved"
+        ),
+        "by_status": by_status,
+        "by_severity": by_severity,
+        "open_by_severity": open_by_severity,
+        "by_source": by_source,
+        "generated_at": datetime.now(UTC),
+    }
+
+
+@router.get("/findings")
+async def findings_list(
+    user: Authed,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    status_filter: str = Query("", alias="status"),
+    severity: str = "",
+    source: str = "",
+    category: str = "",
+    subject: str = "",
+    assigned_to: str = "",
+    search: str = "",
+) -> dict[str, Any]:
+    query = select(Finding, AppUser).outerjoin(AppUser, Finding.assigned_to == AppUser.id)
+    if user.role != "administrator":
+        query = query.where(Finding.visibility == "viewer")
+    if status_filter:
+        allowed = {"open", "acknowledged", "suppressed", "resolved"}
+        if status_filter not in allowed:
+            raise HTTPException(422, "Invalid finding status")
+        query = query.where(Finding.status == status_filter)
+    if severity:
+        if severity not in SEVERITY_ORDER:
+            raise HTTPException(422, "Invalid finding severity")
+        query = query.where(Finding.severity == severity)
+    if source:
+        query = query.where(Finding.source == source)
+    if category:
+        query = query.where(Finding.category == category)
+    if subject:
+        pattern = f"%{subject}%"
+        query = query.where(
+            or_(Finding.subject_type.ilike(pattern), Finding.subject_display.ilike(pattern))
+        )
+    if assigned_to:
+        query = query.where(
+            Finding.assigned_to.is_(None)
+            if assigned_to == "unassigned"
+            else Finding.assigned_to == assigned_to
+        )
+    if search:
+        pattern = f"%{search}%"
+        query = query.where(
+            or_(
+                Finding.title.ilike(pattern),
+                Finding.summary.ilike(pattern),
+                Finding.subject_display.ilike(pattern),
+            )
+        )
+    cursor_data = decode_cursor(cursor, "findings")
+    if cursor_data:
+        try:
+            cursor_time = datetime.fromisoformat(str(cursor_data["last_seen"]))
+            cursor_id = str(cursor_data["id"])
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(400, "Invalid cursor") from exc
+        query = query.where(
+            or_(
+                Finding.last_seen < cursor_time,
+                and_(Finding.last_seen == cursor_time, Finding.id > cursor_id),
+            )
+        )
+    rows = (
+        await db.execute(query.order_by(Finding.last_seen.desc(), Finding.id).limit(limit + 1))
+    ).all()
+    page = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit and page:
+        last = page[-1][0]
+        next_cursor = encode_cursor(
+            "findings", {"last_seen": last.last_seen.isoformat(), "id": last.id}
+        )
+    return {
+        "items": [_finding_dict(finding, assignee) for finding, assignee in page],
+        "next_cursor": next_cursor,
+    }
+
+
+@router.get("/findings/notification-endpoints")
+async def notification_endpoints(_: Admin, db: Db) -> dict[str, Any]:
+    rows = (
+        await db.scalars(select(NotificationEndpoint).order_by(NotificationEndpoint.name))
+    ).all()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "name": row.name,
+                "url": row.url_display,
+                "minimum_severity": row.minimum_severity,
+                "sources": row.sources,
+                "include_resolved": row.include_resolved,
+                "enabled": row.enabled,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/findings/notification-endpoints")
+async def create_notification_endpoint(
+    payload: NotificationEndpointRequest,
+    _: Admin,
+    __: Csrf,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    try:
+        display = await validate_webhook_url(payload.url, settings)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    secret = new_token()
+    box = SecretBox(settings.encryption_key)
+    row = NotificationEndpoint(
+        name=payload.name,
+        url_display=display,
+        encrypted_url=box.encrypt(payload.url),
+        encrypted_secret=box.encrypt(secret),
+        minimum_severity=payload.minimum_severity,
+        sources=payload.sources,
+        include_resolved=payload.include_resolved,
+        enabled=payload.enabled,
+    )
+    db.add(row)
+    await db.commit()
+    return {"id": row.id, "name": row.name, "url": row.url_display, "signing_secret": secret}
+
+
+@router.put("/findings/notification-endpoints/{endpoint_id}")
+async def update_notification_endpoint(
+    endpoint_id: str,
+    payload: NotificationEndpointRequest,
+    _: Admin,
+    __: Csrf,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    row = await db.get(NotificationEndpoint, endpoint_id)
+    if row is None:
+        raise HTTPException(404, "Notification endpoint not found")
+    try:
+        row.url_display = await validate_webhook_url(payload.url, settings)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    row.name = payload.name
+    row.encrypted_url = SecretBox(settings.encryption_key).encrypt(payload.url)
+    row.minimum_severity = payload.minimum_severity
+    row.sources = payload.sources
+    row.include_resolved = payload.include_resolved
+    row.enabled = payload.enabled
+    await db.commit()
+    return {"id": row.id, "name": row.name, "url": row.url_display, "enabled": row.enabled}
+
+
+@router.delete("/findings/notification-endpoints/{endpoint_id}")
+async def delete_notification_endpoint(endpoint_id: str, _: Admin, __: Csrf, db: Db) -> None:
+    row = await db.get(NotificationEndpoint, endpoint_id)
+    if row is None:
+        raise HTTPException(404, "Notification endpoint not found")
+    row.enabled = False
+    await db.commit()
+
+
+@router.post("/findings/notification-endpoints/{endpoint_id}/test")
+async def test_notification_endpoint(
+    endpoint_id: str,
+    _: Admin,
+    __: Csrf,
+    db: Db,
+) -> dict[str, Any]:
+    endpoint = await db.get(NotificationEndpoint, endpoint_id)
+    if endpoint is None:
+        raise HTTPException(404, "Notification endpoint not found")
+    event_id = str(uuid.uuid4())
+    delivery = NotificationDelivery(
+        endpoint_id=endpoint.id,
+        finding_id=None,
+        event_type="test",
+        idempotency_key=f"{endpoint.id}:{event_id}",
+        payload={
+            "schemaVersion": "1",
+            "eventId": event_id,
+            "eventType": "test",
+            "occurredAt": datetime.now(UTC).isoformat(),
+            "message": "TailView notification endpoint test",
+        },
+    )
+    db.add(delivery)
+    await db.commit()
+    return {"delivery_id": delivery.id, "status": delivery.status}
+
+
+@router.get("/findings/notification-deliveries")
+async def notification_deliveries(_: Admin, db: Db) -> dict[str, Any]:
+    rows = (
+        await db.scalars(
+            select(NotificationDelivery).order_by(NotificationDelivery.created_at.desc()).limit(200)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "endpoint_id": row.endpoint_id,
+                "finding_id": row.finding_id,
+                "event_type": row.event_type,
+                "status": row.status,
+                "attempt_count": row.attempt_count,
+                "next_attempt": row.next_attempt,
+                "last_attempt": row.last_attempt,
+                "delivered_at": row.delivered_at,
+                "http_status": row.http_status,
+                "error_class": row.error_class,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/findings/assignees")
+async def finding_assignees(_: Admin, db: Db) -> dict[str, Any]:
+    rows = (
+        await db.scalars(select(AppUser).where(AppUser.active.is_(True)).order_by(AppUser.username))
+    ).all()
+    return {"items": [{"id": row.id, "username": row.username, "role": row.role} for row in rows]}
+
+
+@router.get("/findings/{finding_id}")
+async def finding_detail(finding_id: str, user: Authed, db: Db) -> dict[str, Any]:
+    finding = await db.get(Finding, finding_id)
+    if finding is None or not _finding_visible(user, finding):
+        raise HTTPException(404, "Finding not found")
+    assignee = await db.get(AppUser, finding.assigned_to) if finding.assigned_to else None
+    occurrences = (
+        await db.scalars(
+            select(FindingOccurrence)
+            .where(FindingOccurrence.finding_id == finding.id)
+            .order_by(FindingOccurrence.occurred_at.desc())
+            .limit(200)
+        )
+    ).all()
+    transitions = (
+        await db.scalars(
+            select(FindingTransition)
+            .where(FindingTransition.finding_id == finding.id)
+            .order_by(FindingTransition.occurred_at.desc())
+            .limit(200)
+        )
+    ).all()
+    return {
+        **_finding_dict(finding, assignee),
+        "occurrences": [
+            {
+                "id": row.id,
+                "event_type": row.event_type,
+                "severity": row.severity,
+                "evidence": row.evidence,
+                "occurred_at": row.occurred_at,
+            }
+            for row in occurrences
+        ],
+        "transitions": [
+            {
+                "id": row.id,
+                "from_status": row.from_status,
+                "to_status": row.to_status,
+                "actor_id": row.actor_id,
+                "reason": row.reason,
+                "occurred_at": row.occurred_at,
+            }
+            for row in transitions
+        ],
+    }
+
+
+async def _finding_for_action(finding_id: str, db: AsyncSession) -> Finding:
+    finding = await db.get(Finding, finding_id)
+    if finding is None:
+        raise HTTPException(404, "Finding not found")
+    return finding
+
+
+def _record_finding_transition(
+    db: AsyncSession,
+    finding: Finding,
+    status_value: str,
+    actor: AppUser,
+    reason: str,
+) -> None:
+    db.add(
+        FindingTransition(
+            finding_id=finding.id,
+            from_status=finding.status,
+            to_status=status_value,
+            actor_id=actor.id,
+            reason=reason,
+        )
+    )
+    finding.status = status_value
+
+
+@router.post("/findings/{finding_id}/acknowledge")
+async def acknowledge_finding(
+    finding_id: str, payload: FindingActionRequest, user: Admin, _: Csrf, db: Db
+) -> dict[str, Any]:
+    finding = await _finding_for_action(finding_id, db)
+    if finding.status == "resolved":
+        raise HTTPException(409, "Resolved findings cannot be acknowledged")
+    _record_finding_transition(db, finding, "acknowledged", user, payload.reason)
+    finding.acknowledged_at = datetime.now(UTC)
+    finding.acknowledged_by = user.id
+    await db.commit()
+    return _finding_dict(finding)
+
+
+@router.post("/findings/{finding_id}/reopen")
+async def reopen_finding(
+    finding_id: str, payload: FindingActionRequest, user: Admin, _: Csrf, db: Db
+) -> dict[str, Any]:
+    finding = await _finding_for_action(finding_id, db)
+    _record_finding_transition(db, finding, "open", user, payload.reason)
+    finding.resolved_at = None
+    finding.suppressed_until = None
+    finding.suppression_reason = ""
+    await db.commit()
+    return _finding_dict(finding)
+
+
+@router.post("/findings/{finding_id}/suppress")
+async def suppress_finding(
+    finding_id: str, payload: FindingSuppressRequest, user: Admin, _: Csrf, db: Db
+) -> dict[str, Any]:
+    finding = await _finding_for_action(finding_id, db)
+    if finding.status == "resolved":
+        raise HTTPException(409, "Resolved findings cannot be suppressed")
+    durations = {
+        "1h": timedelta(hours=1),
+        "24h": timedelta(hours=24),
+        "7d": timedelta(days=7),
+        "30d": timedelta(days=30),
+    }
+    finding.suppressed_until = (
+        datetime.now(UTC) + durations[payload.duration]
+        if payload.duration != "indefinite"
+        else None
+    )
+    finding.suppression_reason = payload.reason
+    _record_finding_transition(db, finding, "suppressed", user, payload.reason)
+    await db.commit()
+    return _finding_dict(finding)
+
+
+@router.post("/findings/{finding_id}/unsuppress")
+async def unsuppress_finding(
+    finding_id: str, payload: FindingActionRequest, user: Admin, _: Csrf, db: Db
+) -> dict[str, Any]:
+    finding = await _finding_for_action(finding_id, db)
+    if finding.status != "suppressed":
+        raise HTTPException(409, "Finding is not suppressed")
+    _record_finding_transition(db, finding, "open", user, payload.reason)
+    finding.suppressed_until = None
+    finding.suppression_reason = ""
+    await db.commit()
+    return _finding_dict(finding)
+
+
+@router.post("/findings/{finding_id}/assign")
+async def assign_finding(
+    finding_id: str, payload: FindingAssignRequest, user: Admin, _: Csrf, db: Db
+) -> dict[str, Any]:
+    finding = await _finding_for_action(finding_id, db)
+    assignee = None
+    if payload.user_id:
+        assignee = await db.get(AppUser, payload.user_id)
+        if assignee is None or not assignee.active:
+            raise HTTPException(422, "Assignee must be an active TailView user")
+    finding.assigned_to = payload.user_id
+    db.add(
+        FindingTransition(
+            finding_id=finding.id,
+            from_status=finding.status,
+            to_status=finding.status,
+            actor_id=user.id,
+            reason=f"Assigned to {assignee.username}" if assignee else "Assignment cleared",
+        )
+    )
+    await db.commit()
+    return _finding_dict(finding, assignee)
 
 
 def _governance_credential_status(row: TailnetCredential, now: datetime) -> str:
@@ -1978,8 +2468,7 @@ async def _governance_findings(db: AsyncSession) -> list[dict[str, Any]]:
         )
         age = (now - created_at).days if created_at else None
         expiring = bool(
-            invite_expires_at
-            and timedelta(0) < invite_expires_at - now <= timedelta(days=7)
+            invite_expires_at and timedelta(0) < invite_expires_at - now <= timedelta(days=7)
         )
         if (age is not None and age >= 14) or expiring:
             findings.append(
@@ -2270,8 +2759,7 @@ async def _security_device_rows(db: AsyncSession) -> list[dict[str, Any]]:
         )
     ).all()
     states = {
-        state.device_id: state
-        for state in (await db.scalars(select(DevicePostureState))).all()
+        state.device_id: state for state in (await db.scalars(select(DevicePostureState))).all()
     }
     attribute_rows = (
         await db.scalars(
@@ -2389,9 +2877,7 @@ async def security_posture(_: Authed, db: Db) -> dict[str, Any]:
             ),
             "percent": round(
                 100
-                * sum(
-                    1 for item in devices if item["posture"]["evidence_status"] == "available"
-                )
+                * sum(1 for item in devices if item["posture"]["evidence_status"] == "available")
                 / device_total,
                 1,
             )
@@ -2447,9 +2933,7 @@ async def security_posture_devices(
         evaluations = details["evaluations"]
         if result and details["status"] != result:
             continue
-        if posture and not any(
-            evaluation["name"] == posture for evaluation in evaluations
-        ):
+        if posture and not any(evaluation["name"] == posture for evaluation in evaluations):
             continue
         if attribute and not any(
             attribute.casefold() in value["key"].casefold() for value in attributes
@@ -2557,11 +3041,13 @@ async def run_sync(
     }
     if kind in {"flows", "audit"}:
         await sync_logs(kind)
+        await evaluate_findings_job()
         return {"status": "completed", "kind": kind}
     synchronize = synchronizers.get(kind)
     if synchronize is None:
         raise HTTPException(404, "Unknown synchronization source")
     await synchronize()
+    await evaluate_findings_job()
     return {"status": "completed", "kind": kind}
 
 

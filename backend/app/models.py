@@ -411,6 +411,110 @@ class SavedView(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Finding(Base):
+    __tablename__ = "findings"
+    __table_args__ = (
+        UniqueConstraint("fingerprint", name="uq_findings_fingerprint"),
+        Index("ix_findings_status_severity_last_seen", "status", "severity", "last_seen"),
+    )
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    category: Mapped[str] = mapped_column(String(64), index=True)
+    severity: Mapped[str] = mapped_column(String(16), index=True)
+    title: Mapped[str] = mapped_column(String(512))
+    summary: Mapped[str] = mapped_column(Text)
+    remediation: Mapped[str] = mapped_column(Text, default="")
+    subject_type: Mapped[str] = mapped_column(String(64), index=True)
+    subject_id: Mapped[str] = mapped_column(String(64), index=True)
+    subject_display: Mapped[str] = mapped_column(String(512), default="")
+    visibility: Mapped[str] = mapped_column(String(32), default="viewer", index=True)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    link_path: Mapped[str] = mapped_column(String(1024), default="")
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    stale: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_evaluated: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_by: Mapped[str | None] = mapped_column(String(36))
+    suppressed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    suppression_reason: Mapped[str] = mapped_column(String(1000), default="")
+    assigned_to: Mapped[str | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL"), index=True
+    )
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class FindingOccurrence(Base):
+    __tablename__ = "finding_occurrences"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    finding_id: Mapped[str] = mapped_column(
+        ForeignKey("findings.id", ondelete="CASCADE"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(32), default="observed")
+    severity: Mapped[str] = mapped_column(String(16))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class FindingTransition(Base):
+    __tablename__ = "finding_transitions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    finding_id: Mapped[str] = mapped_column(
+        ForeignKey("findings.id", ondelete="CASCADE"), index=True
+    )
+    from_status: Mapped[str | None] = mapped_column(String(32))
+    to_status: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[str | None] = mapped_column(String(36))
+    reason: Mapped[str] = mapped_column(String(1000), default="")
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class NotificationEndpoint(Base):
+    __tablename__ = "notification_endpoints"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(128))
+    url_display: Mapped[str] = mapped_column(String(1024))
+    encrypted_url: Mapped[bytes] = mapped_column(LargeBinary)
+    encrypted_secret: Mapped[bytes] = mapped_column(LargeBinary)
+    minimum_severity: Mapped[str] = mapped_column(String(16), default="high")
+    sources: Mapped[list[str]] = mapped_column(JSON, default=list)
+    include_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_notification_delivery_idempotency"),
+        Index("ix_notification_delivery_due", "status", "next_attempt"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    endpoint_id: Mapped[str] = mapped_column(
+        ForeignKey("notification_endpoints.id", ondelete="CASCADE"), index=True
+    )
+    finding_id: Mapped[str | None] = mapped_column(
+        ForeignKey("findings.id", ondelete="SET NULL"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(32))
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_attempt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    error_class: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class RawPayload(Base):
     __tablename__ = "raw_payloads"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

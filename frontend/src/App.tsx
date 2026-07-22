@@ -10,6 +10,7 @@ import {
 import {
   Activity,
   Boxes,
+  BellRing,
   ChevronRight,
   CircleUserRound,
   FileKey2,
@@ -43,6 +44,7 @@ import {
   Devices,
   DnsSettings,
   Flows,
+  Findings,
   InventoryPage,
   Policy,
   SettingsPage,
@@ -71,6 +73,7 @@ export const nav = [
   ["Tags", "/tags", Tags],
   ["Policy", "/policy", FileKey2],
   ["Security posture", "/security/posture", ShieldCheck],
+  ["Findings", "/findings", BellRing],
   ["Access governance", "/security/governance", KeyRound],
   ["Audit", "/audit", Shield],
   ["Sync jobs", "/sync", RefreshCw],
@@ -347,6 +350,15 @@ export function Shell({
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
+  const findingSummary = useQuery({
+    queryKey: ["findings-summary"],
+    queryFn: () => request<{ open_by_severity: Record<string, number> }>("/findings/summary"),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+  const urgentFindings =
+    (findingSummary.data?.open_by_severity?.critical ?? 0)
+    + (findingSummary.data?.open_by_severity?.high ?? 0);
   const partitionedNav = partitionNavigation(
     roleNav,
     capabilities.data?.items ?? [],
@@ -405,6 +417,11 @@ export function Shell({
             >
               <Icon />
               <span>{label}</span>
+              {path === "/findings" && urgentFindings > 0 && (
+                <small className="nav-count" aria-label={`${urgentFindings} urgent findings`}>
+                  {urgentFindings > 99 ? "99+" : urgentFindings}
+                </small>
+              )}
             </button>
           ))}
           {partitionedNav.inactive.length > 0 && (
@@ -519,6 +536,7 @@ export function Shell({
             <Route path="/tags" element={<InventoryPage kind="tags" />} />
             <Route path="/policy" element={<Policy />} />
             <Route path="/security/posture" element={<SecurityPosture />} />
+            <Route path="/findings" element={<Findings user={user} />} />
             <Route
               path="/security/governance"
               element={
