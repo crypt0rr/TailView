@@ -115,7 +115,7 @@ const palette = [
 ];
 
 export function Dashboard() {
-  const { hours } = useTimeRange();
+  const { hours, range } = useTimeRange();
   const query = useQuery({
     queryKey: ["dashboard", hours],
     queryFn: () => request<Record<string, any>>(`/dashboard?hours=${hours}`),
@@ -232,35 +232,37 @@ export function Dashboard() {
         </Card>
         <Card className="chart-card wide">
           <CardHead
-            title="Top node pairs"
-            detail="Aggregated reported volume"
+            title="Top endpoint pairs"
+            detail="Aggregated reported volume; unresolved addresses remain client-reported"
             action={
-              <a href="/flows">
+              <Link to={`/flows?range=${range}`}>
                 Explore flows <ChevronRight />
-              </a>
+              </Link>
             }
           />
           <div className="pair-list">
-            {(d.top_pairs as any[]).map((p: any, i: number) => (
-              <div key={`${p.source}-${p.destination}`}>
+            {(d.top_pairs as DashboardTopPair[]).map((p, i) => (
+              <div key={`${p.source_device_id ?? p.source_raw}-${p.destination_device_id ?? p.destination_raw}`}>
                 <span className="rank">0{i + 1}</span>
                 <div>
-                  <EntityLink
-                    label={p.source}
-                    deviceId={p.source_device_id}
-                  />
+                  <DashboardPairEndpoint pair={p} side="source" />
                   <small>
                     to{" "}
-                    <EntityLink
-                      label={p.destination}
-                      deviceId={p.destination_device_id}
-                    />
+                    <DashboardPairEndpoint pair={p} side="destination" />
                   </small>
                 </div>
                 <span className="flow-line">
                   <i style={{ width: `${Math.max(12, 100 - i * 18)}%` }} />
                 </span>
-                <strong>{formatBytes(p.reported_bytes)}</strong>
+                <span className="pair-volume">
+                  <strong>{formatBytes(p.reported_bytes)}</strong>
+                  <Link
+                    to={dashboardPairFlowHref(p, range)}
+                    aria-label={`View matching flows for ${p.source} to ${p.destination}`}
+                  >
+                    View flows <ChevronRight />
+                  </Link>
+                </span>
               </div>
             ))}
           </div>
@@ -268,6 +270,55 @@ export function Dashboard() {
       </div>
     </div>
   );
+}
+
+export type DashboardTopPair = {
+  source: string;
+  source_device_id: string | null;
+  source_service_id?: string | null;
+  source_raw: string | null;
+  source_resolved: boolean;
+  destination: string;
+  destination_device_id: string | null;
+  destination_service_id?: string | null;
+  destination_raw: string | null;
+  destination_resolved: boolean;
+  reported_bytes: number;
+};
+
+export function dashboardPairFlowHref(
+  pair: DashboardTopPair,
+  range: "1h" | "24h" | "7d" | "30d",
+) {
+  const params = new URLSearchParams({ range });
+  const source = pair.source_device_id ?? pair.source_raw;
+  const destination = pair.destination_device_id ?? pair.destination_raw;
+  if (source) params.set("source", source);
+  if (destination) params.set("destination", destination);
+  if (!pair.source_device_id || !pair.destination_device_id) {
+    params.set("resolution", "unresolved");
+  }
+  return `/flows?${params.toString()}`;
+}
+
+function DashboardPairEndpoint({
+  pair,
+  side,
+}: {
+  pair: DashboardTopPair;
+  side: "source" | "destination";
+}) {
+  const label = pair[side];
+  const deviceId = pair[`${side}_device_id`];
+  const serviceId = pair[`${side}_service_id`];
+  const resolved = pair[`${side}_resolved`];
+  if (serviceId) {
+    return <Link className="entity-link" to={`/services?search=${encodeURIComponent(serviceId)}`}>{label}</Link>;
+  }
+  return <span className="dashboard-pair-endpoint">
+    <EntityLink label={label} deviceId={deviceId} />
+    {!resolved && <Badge tone="neutral">unresolved</Badge>}
+  </span>;
 }
 
 type FindingsUser = { id: string; username: string; role: "administrator" | "viewer" };

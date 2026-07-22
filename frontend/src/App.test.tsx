@@ -17,6 +17,7 @@ import {
   PolicySecurityReview,
   SecurityPosture,
   TailViewAccess,
+  dashboardPairFlowHref,
   dashboardMetricCards,
   keyExpiryState,
   trafficChartData,
@@ -86,6 +87,22 @@ describe("TailView", () => {
       ["fallback", true],
       ["routes", { "corp.example": ["100.64.0.53"] }],
     ]);
+  });
+
+  it("deep-links unresolved dashboard pairs to their exact raw flow endpoints", () => {
+    expect(dashboardPairFlowHref({
+      source: "apple-tv.example.ts.net",
+      source_device_id: "node-apple-tv",
+      source_raw: null,
+      source_resolved: true,
+      destination: "203.0.113.10",
+      destination_device_id: null,
+      destination_raw: "203.0.113.10",
+      destination_resolved: false,
+      reported_bytes: 1024,
+    }, "24h")).toBe(
+      "/flows?range=24h&source=node-apple-tv&destination=203.0.113.10&resolution=unresolved",
+    );
   });
 
   it("leaves the authenticated shell after logout", async () => {

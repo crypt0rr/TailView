@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import String, and_, cast, delete, desc, func, or_, select, update
+from sqlalchemy import String, and_, case, cast, delete, desc, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1825,15 +1825,32 @@ async def dashboard(
         await db.execute(select(Device.primary_role, func.count()).group_by(Device.primary_role))
     ).all()
     os_rows = (await db.execute(select(Device.os, func.count()).group_by(Device.os))).all()
+    # Preserve raw endpoint identity only when no synchronized device ID is
+    # available. Grouping on device IDs alone collapses every unresolved
+    # endpoint into one misleading NULL -> NULL pair.
+    source_raw = case(
+        (Flow.source_device_id.is_(None), Flow.source), else_=None
+    ).label("source_raw")
+    destination_raw = case(
+        (Flow.destination_device_id.is_(None), Flow.destination), else_=None
+    ).label("destination_raw")
     top_pairs_query = select(
         Flow.source_device_id,
+        source_raw,
         Flow.destination_device_id,
+        destination_raw,
         func.sum(Flow.tx_bytes + Flow.rx_bytes).label("bytes"),
-    ).group_by(Flow.source_device_id, Flow.destination_device_id)
+    ).group_by(
+        Flow.source_device_id,
+        source_raw,
+        Flow.destination_device_id,
+        destination_raw,
+    )
     top_pairs_query = apply_flow_filters(top_pairs_query, filters, now)
     top_pairs = (await db.execute(top_pairs_query.order_by(desc("bytes")).limit(5))).all()
     traffic_series = await flow_summary_series(db, filters, now=now)
     labels = await device_label_map(db)
+    service_addresses = await service_address_map(db)
     finding_query = select(Finding.severity, func.count()).where(
         Finding.status.in_(["open", "acknowledged"])
     )
@@ -1860,13 +1877,45 @@ async def dashboard(
         "operating_systems": [{"name": n, "value": c} for n, c in os_rows],
         "top_pairs": [
             {
-                "source": labels.get(s, s or "Unresolved source"),
-                "source_device_id": s,
-                "destination": labels.get(d, d or "Unresolved destination"),
-                "destination_device_id": d,
-                "reported_bytes": b or 0,
+                "source": (
+                    service_addresses[source_value][1]
+                    if not source_id and source_value in service_addresses
+                    else labels.get(source_id, source_id)
+                    if source_id
+                    else source_value or "Source not reported"
+                ),
+                "source_device_id": source_id,
+                "source_service_id": (
+                    service_addresses[source_value][0]
+                    if not source_id and source_value in service_addresses
+                    else None
+                ),
+                "source_raw": source_value,
+                "source_resolved": bool(
+                    source_id or (source_value and source_value in service_addresses)
+                ),
+                "destination": (
+                    service_addresses[destination_value][1]
+                    if not destination_id and destination_value in service_addresses
+                    else labels.get(destination_id, destination_id)
+                    if destination_id
+                    else destination_value or "Destination not logged"
+                ),
+                "destination_device_id": destination_id,
+                "destination_service_id": (
+                    service_addresses[destination_value][0]
+                    if not destination_id and destination_value in service_addresses
+                    else None
+                ),
+                "destination_raw": destination_value,
+                "destination_resolved": bool(
+                    destination_id
+                    or (destination_value and destination_value in service_addresses)
+                ),
+                "reported_bytes": byte_count or 0,
             }
-            for s, d, b in top_pairs
+            for source_id, source_value, destination_id, destination_value, byte_count
+            in top_pairs
         ],
         "traffic_series": traffic_series,
         "range_hours": hours,

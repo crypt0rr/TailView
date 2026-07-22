@@ -235,6 +235,12 @@ async def test_flow_filters_summary_dashboard_and_export_agree(db_session) -> No
     overview = await dashboard(VIEWER, db_session, hours=24)
     assert sum(point["reported_bytes"] for point in overview["traffic_series"]) == 1400
     assert overview["top_pairs"][0]["reported_bytes"] in {500, 900}
+    unresolved_pair = next(
+        item for item in overview["top_pairs"] if item["destination_raw"] == "203.0.113.10"
+    )
+    assert unresolved_pair["destination"] == "203.0.113.10"
+    assert unresolved_pair["destination_device_id"] is None
+    assert unresolved_pair["destination_resolved"] is False
 
     response = await export_flows(
         "csv",
