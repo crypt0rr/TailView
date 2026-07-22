@@ -59,11 +59,22 @@ done
 
 docker exec -i "$container" pg_restore -U tailview_verify -d tailview_verify \
   --clean --if-exists --no-owner --no-privileges < "$backup_path"
-docker compose build backend >/dev/null
+backend_container="$(docker compose ps -q backend)"
+[ -n "$backend_container" ] || {
+  echo "The TailView backend container must be running before backup verification" >&2
+  error_class="BackendContainerUnavailable"
+  exit 1
+}
+backend_image="$(docker inspect --format '{{.Image}}' "$backend_container")"
+[ -n "$backend_image" ] || {
+  echo "Unable to resolve the running TailView backend image" >&2
+  error_class="BackendImageUnavailable"
+  exit 1
+}
 docker run --rm --network "$network" \
   -e ENVIRONMENT=development \
   -e DATABASE_URL="postgresql+psycopg://tailview_verify:$password@$container:5432/tailview_verify" \
-  tailview-backend sh -c "alembic upgrade head"
+  "$backend_image" sh -c "alembic upgrade head"
 
 migration_revision="$(docker exec "$container" psql -At -U tailview_verify -d tailview_verify -c 'SELECT version_num FROM alembic_version')"
 postgres_version="$(docker exec "$container" psql -At -U tailview_verify -d tailview_verify -c 'SHOW server_version')"

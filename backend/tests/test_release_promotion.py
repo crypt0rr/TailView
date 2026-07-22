@@ -118,6 +118,14 @@ def test_stable_workflow_cannot_build_and_rc_workflow_cannot_move_latest() -> No
     assert '"${IMAGE}:latest"' not in candidate
 
 
+def test_backup_drill_uses_the_running_compose_backend_image() -> None:
+    script = (ROOT / "deploy" / "verify-backup.sh").read_text(encoding="utf-8")
+    assert "docker compose ps -q backend" in script
+    assert "docker inspect --format '{{.Image}}'" in script
+    assert "docker compose build backend" not in script
+    assert "tailview-backend sh -c" not in script
+
+
 def test_all_release_base_images_are_digest_pinned() -> None:
     files = ("backend/Dockerfile", "frontend/Dockerfile", "deploy/telemetry-agent/Dockerfile")
     for relative in files:
