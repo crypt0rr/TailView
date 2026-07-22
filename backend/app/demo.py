@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import (
+    AppUser,
     AuditEvent,
     Capability,
     Device,
@@ -19,9 +21,14 @@ from .models import (
     FindingOccurrence,
     FindingTransition,
     Flow,
+    FlowAggregateState,
     LogStreamingConfiguration,
     PolicySnapshot,
     PostureIntegration,
+    ReportArtifact,
+    ReportRun,
+    ReportSchedule,
+    SavedView,
     ServiceEndpoint,
     ServiceHost,
     TailnetContact,
@@ -31,6 +38,279 @@ from .models import (
     TailnetUser,
     WebhookEndpoint,
 )
+
+
+async def seed_demo_reports(session: AsyncSession) -> None:
+    """Add report fixtures after the first local Administrator exists."""
+    if await session.get(ReportRun, "demo-report-completed"):
+        return
+    administrator = await session.scalar(
+        select(AppUser).where(AppUser.role == "administrator").order_by(AppUser.created_at)
+    )
+    if administrator is None:
+        return
+    from .reporting import DEFAULT_REPORT_OPTIONS, artifact_payloads
+
+    now = datetime.now(UTC)
+    view = SavedView(
+        id="demo-report-flow-view",
+        owner_id=administrator.id,
+        name="Production traffic",
+        description="Synthetic production traffic used by demo reports.",
+        page="flows",
+        visibility="shared",
+        state={
+            "range": "7d",
+            "category": "",
+            "source": "",
+            "destination": "",
+            "protocol": "",
+            "port": "",
+            "resolution": "all",
+            "ranking_limit": 10,
+        },
+    )
+    schedule = ReportSchedule(
+        id="demo-report-schedule",
+        name="Weekly production usage",
+        saved_view_id=view.id,
+        frequency="weekly",
+        timezone="Europe/Amsterdam",
+        local_time="08:00",
+        weekday=0,
+        enabled=True,
+        created_by=administrator.id,
+        next_run_at=now + timedelta(days=2),
+        last_run_at=now - timedelta(days=5),
+        report_options=dict(DEFAULT_REPORT_OPTIONS),
+    )
+    session.add(view)
+    await session.flush()
+    session.add_all(
+        [
+            schedule,
+            FlowAggregateState(
+                granularity="hourly",
+                coverage_start=now - timedelta(days=90),
+                coverage_end=now,
+                last_success=now - timedelta(minutes=3),
+            ),
+            FlowAggregateState(
+                granularity="daily",
+                coverage_start=now - timedelta(days=240),
+                coverage_end=now,
+                last_success=now - timedelta(minutes=3),
+            ),
+        ]
+    )
+    await session.flush()
+
+    series: list[dict[str, Any]] = [
+        {
+            "bucket_start": (now - timedelta(days=6 - index))
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .isoformat(),
+            "reported_bytes": value,
+            "reported_packets": value // 1300,
+            "record_count": value // 9000,
+        }
+        for index, value in enumerate(
+            (
+                210_000_000,
+                260_000_000,
+                190_000_000,
+                410_000_000,
+                370_000_000,
+                520_000_000,
+                480_000_000,
+            )
+        )
+    ]
+    totals = {
+        "reported_bytes": sum(int(item["reported_bytes"]) for item in series),
+        "reported_packets": sum(int(item["reported_packets"]) for item in series),
+        "record_count": sum(int(item["record_count"]) for item in series),
+    }
+    ranked = [
+        {
+            "id": "n-api",
+            "name": "api-prod",
+            "reported_bytes": 980_000_000,
+            "reported_packets": 720_000,
+            "record_count": 82_000,
+        },
+        {
+            "id": "n-database",
+            "name": "database-prod",
+            "reported_bytes": 740_000_000,
+            "reported_packets": 530_000,
+            "record_count": 61_000,
+        },
+        {
+            "id": "n-laptop",
+            "name": "alice-laptop",
+            "reported_bytes": 360_000_000,
+            "reported_packets": 240_000,
+            "record_count": 28_000,
+        },
+    ]
+    snapshot: dict[str, Any] = {
+        "schema_version": "2",
+        "report_id": "demo-report-completed",
+        "title": "Weekly production usage",
+        "description": "Synthetic demo evidence illustrating a complete scheduled report.",
+        "generated_at": (now - timedelta(hours=2)).isoformat(),
+        "saved_view": {"id": view.id, "revision": 1},
+        "report_options": dict(DEFAULT_REPORT_OPTIONS),
+        "range": {"start": (now - timedelta(days=7)).isoformat(), "end": now.isoformat()},
+        "filters": {},
+        "coverage": {
+            "complete": True,
+            "coverage_start": (now - timedelta(days=90)).isoformat(),
+            "coverage_end": now.isoformat(),
+            "granularity": "hourly",
+        },
+        "notice": "Synthetic client-reported successful traffic; peer reports may overlap.",
+        "traffic": {
+            "granularity": "hourly",
+            "totals": totals,
+            "series": series,
+            "top_devices": ranked,
+            "top_pairs": [{**ranked[0], "id": "api→database", "name": "api-prod → database-prod"}],
+            "top_services": [],
+            "distributions": {
+                "categories": [{**ranked[0], "id": "virtual", "name": "virtual"}],
+                "protocols": [{**ranked[0], "id": "6", "name": "6"}],
+                "ports": [{**ranked[0], "id": "443", "name": "443"}],
+                "resolution": [{**ranked[0], "id": "resolved", "name": "resolved"}],
+            },
+        },
+        "previous_period": {key: int(value * 0.82) for key, value in totals.items()},
+        "comparison": {
+            key: {"current": value, "previous": int(value * 0.82), "change_percent": 21.95}
+            for key, value in totals.items()
+        },
+        "fleet": {
+            "devices": 4,
+            "online": 3,
+            "users": 3,
+            "routes": 2,
+            "services": 1,
+            "last_synchronization": (now - timedelta(minutes=4)).isoformat(),
+            "basis": "current synthetic inventory at report generation time",
+            "source_freshness": {"devices": (now - timedelta(minutes=4)).isoformat()},
+        },
+        "aggregate_coverage": {},
+        "retention": {"hourly_days": 90, "daily_days": 400, "raw_flow_days": 30},
+        "evidence_sha256": hashlib.sha256(b"tailview-demo-report").hexdigest(),
+    }
+    completed = ReportRun(
+        id="demo-report-completed",
+        period_key="schedule:demo-report-schedule:complete",
+        schedule_id=schedule.id,
+        saved_view_id=view.id,
+        saved_view_revision=1,
+        requested_by=administrator.id,
+        title=snapshot["title"],
+        status="completed",
+        range_start=now - timedelta(days=7),
+        range_end=now,
+        filters={},
+        report_options=dict(DEFAULT_REPORT_OPTIONS),
+        snapshot_schema_version=2,
+        generation_stage="completed",
+        progress=100,
+        snapshot=snapshot,
+        coverage=snapshot["coverage"],
+        created_at=now - timedelta(hours=2, minutes=1),
+        started_at=now - timedelta(hours=2),
+        completed_at=now - timedelta(hours=2) + timedelta(seconds=8),
+    )
+    partial_snapshot: dict[str, Any] = {
+        **snapshot,
+        "report_id": "demo-report-partial",
+        "title": "Long-range traffic",
+        "coverage": {
+            **snapshot["coverage"],
+            "complete": False,
+            "coverage_start": (now - timedelta(days=240)).isoformat(),
+            "granularity": "daily",
+        },
+    }
+    partial = ReportRun(
+        id="demo-report-partial",
+        period_key="manual:demo-partial",
+        saved_view_id=view.id,
+        saved_view_revision=1,
+        requested_by=administrator.id,
+        title="Long-range traffic",
+        status="partial",
+        range_start=now - timedelta(days=400),
+        range_end=now,
+        filters={},
+        report_options=dict(DEFAULT_REPORT_OPTIONS),
+        snapshot_schema_version=2,
+        generation_stage="completed",
+        progress=100,
+        snapshot=partial_snapshot,
+        coverage=partial_snapshot["coverage"],
+        created_at=now - timedelta(days=1),
+        completed_at=now - timedelta(days=1) + timedelta(seconds=9),
+    )
+    failed = ReportRun(
+        id="demo-report-failed",
+        period_key="manual:demo-failed",
+        saved_view_id=view.id,
+        saved_view_revision=1,
+        requested_by=administrator.id,
+        title="Failed demo report",
+        status="failed",
+        range_start=now - timedelta(days=30),
+        range_end=now,
+        report_options=dict(DEFAULT_REPORT_OPTIONS),
+        snapshot_schema_version=2,
+        generation_stage="failed",
+        progress=55,
+        error="Report generation failed (synthetic demo error)",
+        created_at=now - timedelta(days=2),
+        completed_at=now - timedelta(days=2) + timedelta(seconds=5),
+    )
+    retry = ReportRun(
+        id="demo-report-retry",
+        period_key="retry:demo-report-failed",
+        retry_of_id=failed.id,
+        saved_view_id=view.id,
+        saved_view_revision=1,
+        requested_by=administrator.id,
+        title=failed.title,
+        status="running",
+        range_start=failed.range_start,
+        range_end=failed.range_end,
+        report_options=dict(DEFAULT_REPORT_OPTIONS),
+        snapshot_schema_version=2,
+        generation_stage="rendering",
+        progress=55,
+        created_at=now - timedelta(minutes=2),
+        started_at=now - timedelta(minutes=1),
+    )
+    session.add_all([completed, partial, failed])
+    await session.flush()
+    session.add(retry)
+    await session.flush()
+    for run, value in ((completed, snapshot), (partial, partial_snapshot)):
+        for format_name, (content_type, filename, content) in artifact_payloads(value).items():
+            session.add(
+                ReportArtifact(
+                    run_id=run.id,
+                    format=format_name,
+                    content_type=content_type,
+                    filename=filename,
+                    content_hash=hashlib.sha256(content).hexdigest(),
+                    size=len(content),
+                    content=content,
+                )
+            )
+    await session.commit()
 
 
 async def seed_demo(session: AsyncSession) -> None:

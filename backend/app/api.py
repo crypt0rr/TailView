@@ -24,7 +24,7 @@ from .addresses import (
 )
 from .config import Settings, get_settings
 from .db import get_db
-from .demo import seed_demo
+from .demo import seed_demo, seed_demo_reports
 from .findings import (
     SEVERITY_ORDER,
     evaluate_findings_job,
@@ -55,6 +55,7 @@ from .models import (
     FindingOccurrence,
     FindingTransition,
     Flow,
+    FlowAggregateState,
     LocalMetadata,
     LocalSecurityEvent,
     LogStreamingConfiguration,
@@ -92,7 +93,9 @@ from .policy import (
 from .reporting import (
     RANGE_HOURS,
     new_manual_run,
+    new_retry_run,
     next_schedule_time,
+    normalize_report_options,
     validate_timezone,
 )
 from .saved_views import compatible_state, normalize_state, page_allowed
@@ -435,7 +438,10 @@ async def setup(
     db: Db,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> UserResponse:
-    return await auth.setup_admin(payload, request, response, db, settings)
+    result = await auth.setup_admin(payload, request, response, db, settings)
+    if settings.demo_mode:
+        await seed_demo_reports(db)
+    return result
 
 
 @router.post("/auth/login", response_model=AuthResult)
@@ -1399,6 +1405,11 @@ async def _report_dict(run: ReportRun, db: AsyncSession, detail: bool = False) -
         "schedule_id": run.schedule_id,
         "saved_view_id": run.saved_view_id,
         "saved_view_revision": run.saved_view_revision,
+        "retry_of_id": run.retry_of_id,
+        "report_options": normalize_report_options(run.report_options),
+        "snapshot_schema_version": run.snapshot_schema_version,
+        "generation_stage": run.generation_stage,
+        "progress": run.progress,
         "range_start": run.range_start,
         "range_end": run.range_end,
         "filters": run.filters,
@@ -1414,8 +1425,10 @@ async def _report_dict(run: ReportRun, db: AsyncSession, detail: bool = False) -
     return value
 
 
-def _schedule_dict(schedule: ReportSchedule) -> dict[str, Any]:
-    return {
+async def _schedule_dict(
+    schedule: ReportSchedule, db: AsyncSession, include_runs: bool = False
+) -> dict[str, Any]:
+    value: dict[str, Any] = {
         "id": schedule.id,
         "name": schedule.name,
         "saved_view_id": schedule.saved_view_id,
@@ -1424,6 +1437,7 @@ def _schedule_dict(schedule: ReportSchedule) -> dict[str, Any]:
         "local_time": schedule.local_time,
         "weekday": schedule.weekday,
         "month_day": schedule.month_day,
+        "report_options": normalize_report_options(schedule.report_options),
         "enabled": schedule.enabled,
         "next_run_at": schedule.next_run_at,
         "last_run_at": schedule.last_run_at,
@@ -1431,6 +1445,27 @@ def _schedule_dict(schedule: ReportSchedule) -> dict[str, Any]:
         "created_at": schedule.created_at,
         "updated_at": schedule.updated_at,
     }
+    if include_runs:
+        runs = (
+            await db.scalars(
+                select(ReportRun)
+                .where(ReportRun.schedule_id == schedule.id)
+                .order_by(ReportRun.created_at.desc())
+                .limit(5)
+            )
+        ).all()
+        value["recent_runs"] = [
+            {
+                "id": run.id,
+                "title": run.title,
+                "status": run.status,
+                "created_at": run.created_at,
+                "completed_at": run.completed_at,
+                "retry_of_id": run.retry_of_id,
+            }
+            for run in runs
+        ]
+    return value
 
 
 def _validate_schedule_payload(payload: ReportScheduleRequest) -> None:
@@ -1460,9 +1495,28 @@ async def reports_summary(_: Authed, db: Db) -> dict[str, Any]:
         .order_by(ReportRun.completed_at.desc())
         .limit(1)
     )
+    settings = get_settings()
+    aggregate_coverage = {
+        state.granularity: {
+            "coverage_start": state.coverage_start,
+            "coverage_end": state.coverage_end,
+            "last_success": state.last_success,
+            "last_error": state.last_error,
+            "retention_days": settings.flow_hourly_aggregate_retention_days
+            if state.granularity == "hourly"
+            else settings.flow_daily_aggregate_retention_days,
+        }
+        for state in (await db.scalars(select(FlowAggregateState))).all()
+    }
+    latest_value = await _report_dict(latest, db) if latest else None
+    if latest is not None and latest_value is not None:
+        latest_value["trend"] = latest.snapshot.get("traffic", {}).get("series", [])[-120:]
+        latest_value["totals"] = latest.snapshot.get("traffic", {}).get("totals", {})
+        latest_value["comparison"] = latest.snapshot.get("comparison")
     return {
         "counts": counts,
-        "latest": await _report_dict(latest, db) if latest else None,
+        "latest": latest_value,
+        "aggregate_coverage": aggregate_coverage,
     }
 
 
@@ -1528,7 +1582,14 @@ async def generate_network_report(
     range_name = payload.range or str(view.state.get("range", "24h"))
     if range_name not in RANGE_HOURS:
         raise HTTPException(422, "Unsupported report range")
-    run = new_manual_run(view, user.id, range_name, payload.title, datetime.now(UTC))
+    run = new_manual_run(
+        view,
+        user.id,
+        range_name,
+        payload.title,
+        datetime.now(UTC),
+        payload.report_options.model_dump(),
+    )
     db.add(run)
     await db.commit()
     return await _report_dict(run, db)
@@ -1568,19 +1629,16 @@ async def download_report(
 
 
 @router.post("/reports/{report_id}/retry", status_code=202)
-async def retry_report(report_id: str, _: Admin, __: Csrf, db: Db) -> dict[str, Any]:
+async def retry_report(report_id: str, user: Admin, _: Csrf, db: Db) -> dict[str, Any]:
     run = await db.get(ReportRun, report_id)
     if run is None:
         raise HTTPException(404, "Report not found")
     if run.status != "failed":
         raise HTTPException(409, "Only failed reports can be retried")
-    await db.execute(delete(ReportArtifact).where(ReportArtifact.run_id == report_id))
-    run.status = "queued"
-    run.error = ""
-    run.started_at = None
-    run.completed_at = None
+    retry = new_retry_run(run, user.id, datetime.now(UTC))
+    db.add(retry)
     await db.commit()
-    return await _report_dict(run, db)
+    return await _report_dict(retry, db)
 
 
 @router.get("/report-schedules")
@@ -1588,7 +1646,7 @@ async def report_schedules(_: Admin, db: Db) -> dict[str, Any]:
     rows = (
         await db.scalars(select(ReportSchedule).order_by(func.lower(ReportSchedule.name)))
     ).all()
-    return {"items": [_schedule_dict(row) for row in rows]}
+    return {"items": [await _schedule_dict(row, db, include_runs=True) for row in rows]}
 
 
 @router.post("/report-schedules")
@@ -1607,6 +1665,7 @@ async def create_report_schedule(
         local_time=payload.local_time,
         weekday=payload.weekday if payload.frequency == "weekly" else None,
         month_day=payload.month_day if payload.frequency == "monthly" else None,
+        report_options=payload.report_options.model_dump(),
         enabled=payload.enabled,
         created_by=user.id,
     )
@@ -1615,7 +1674,7 @@ async def create_report_schedule(
     )
     db.add(schedule)
     await db.commit()
-    return _schedule_dict(schedule)
+    return await _schedule_dict(schedule, db)
 
 
 @router.put("/report-schedules/{schedule_id}")
@@ -1640,6 +1699,7 @@ async def update_report_schedule(
     schedule.local_time = payload.local_time
     schedule.weekday = payload.weekday if payload.frequency == "weekly" else None
     schedule.month_day = payload.month_day if payload.frequency == "monthly" else None
+    schedule.report_options = payload.report_options.model_dump()
     schedule.enabled = payload.enabled
     schedule.last_error = ""
     schedule.next_run_at = (
@@ -1647,7 +1707,7 @@ async def update_report_schedule(
     )
     schedule.updated_at = datetime.now(UTC)
     await db.commit()
-    return _schedule_dict(schedule)
+    return await _schedule_dict(schedule, db)
 
 
 @router.delete("/report-schedules/{schedule_id}")
@@ -1668,7 +1728,14 @@ async def run_report_schedule(schedule_id: str, user: Admin, _: Csrf, db: Db) ->
     if view.page != "flows" or not compatible_state(view.page, view.schema_version, view.state):
         raise HTTPException(422, "Saved Flow view is missing or incompatible")
     range_name = {"daily": "24h", "weekly": "7d", "monthly": "30d"}[schedule.frequency]
-    run = new_manual_run(view, user.id, range_name, schedule.name, datetime.now(UTC))
+    run = new_manual_run(
+        view,
+        user.id,
+        range_name,
+        schedule.name,
+        datetime.now(UTC),
+        schedule.report_options,
+    )
     run.schedule_id = schedule.id
     db.add(run)
     await db.commit()
@@ -4409,6 +4476,7 @@ async def demo_seed(
     if not settings.demo_mode:
         raise HTTPException(409, "Demo mode is disabled")
     await seed_demo(db)
+    await seed_demo_reports(db)
     return {"status": "seeded"}
 
 

@@ -23,4 +23,4 @@ Application rollback is safe only when its schema is compatible with the migrate
 
 Start with two backend CPUs, 1 GiB backend memory, and PostgreSQL sized for flow retention. Large tailnets should monitor database size, query duration, raw flow ingestion, and graph edge counts. Apply host-level limits appropriate for observed load.
 
-Reporting adds hourly and daily aggregate tables plus retained binary artifacts. Size PostgreSQL for `FLOW_DAILY_AGGREGATE_RETENTION_DAYS` and `REPORT_ARTIFACT_RETENTION_DAYS`, monitor failed report runs, and keep `REPORT_MAX_CONCURRENT_JOBS=1` unless the backend has sufficient CPU and memory for parallel PDF generation.
+Reporting adds hourly and daily aggregate tables plus retained binary artifacts. Size PostgreSQL for `FLOW_DAILY_AGGREGATE_RETENTION_DAYS` and `REPORT_ARTIFACT_RETENTION_DAYS`, monitor failed or timeout-recovered report runs and aggregate coverage on the Reports page, and keep `REPORT_MAX_CONCURRENT_JOBS=1` unless the backend has sufficient CPU and memory for parallel PDF generation. Existing schema-v1 reports remain valid after the reporting-experience migration.

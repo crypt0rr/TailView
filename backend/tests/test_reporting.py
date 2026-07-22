@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import api
 from app.config import Settings
+from app.demo import seed_demo_reports
 from app.models import (
     AppUser,
     Base,
@@ -29,11 +30,13 @@ from app.reporting import (
     build_report_snapshot,
     cleanup_flow_data,
     next_schedule_time,
+    normalize_report_options,
     rebuild_aggregate_range,
+    recover_stale_report_runs,
     render_csv_bundle,
     update_flow_aggregates,
 )
-from app.schemas import ReportGenerateRequest, ReportScheduleRequest
+from app.schemas import ReportGenerateRequest, ReportOptions, ReportScheduleRequest
 
 
 @pytest.fixture
@@ -163,14 +166,14 @@ async def test_report_snapshot_and_all_artifact_formats(db) -> None:
     snapshot = await build_report_snapshot(db, run)
     payloads = artifact_payloads(snapshot)
 
-    assert snapshot["schema_version"] == "1"
+    assert snapshot["schema_version"] == "2"
     assert snapshot["coverage"]["complete"] is True
     assert set(payloads) == {"pdf", "json", "csv"}
     assert payloads["pdf"][2].startswith(b"%PDF")
     assert json.loads(payloads["json"][2])["report_id"] == run.id
     with zipfile.ZipFile(BytesIO(render_csv_bundle(snapshot))) as archive:
         assert {
-            "metadata.csv",
+            "manifest.csv",
             "summary.csv",
             "timeseries.csv",
             "top_devices.csv",
@@ -251,12 +254,19 @@ async def test_saved_view_and_report_models_preserve_revision(db) -> None:
             timezone="Europe/Amsterdam",
             local_time="08:30",
             weekday=1,
+            report_options=ReportOptions(
+                description="Weekly production evidence",
+                ranking_limit=5,
+                include_previous_period=False,
+                sections=["trends", "devices"],
+            ),
         ),
         admin,
         None,
         db,
     )
     assert schedule["next_run_at"] is not None
+    assert schedule["report_options"]["ranking_limit"] == 5
     queued = await api.generate_network_report(
         ReportGenerateRequest(saved_view_id=view.id, range="90d"),
         admin,
@@ -264,6 +274,85 @@ async def test_saved_view_and_report_models_preserve_revision(db) -> None:
         db,
     )
     assert queued["status"] == "queued"
+    assert queued["snapshot_schema_version"] == 2
+
+
+def test_report_options_are_strict_and_normalized() -> None:
+    with pytest.raises(ValueError):
+        ReportOptions(sections=["trends", "trends"])
+    assert normalize_report_options({"ranking_limit": 7})["ranking_limit"] == 10
+    assert normalize_report_options({"sections": ["devices"]})["sections"] == ["devices"]
+
+
+@pytest.mark.asyncio
+async def test_retry_creates_new_immutable_run(db) -> None:
+    admin = AppUser(username="admin-retry", password_hash="hash", role="administrator")
+    original = ReportRun(
+        period_key="manual:failed",
+        title="Failed report",
+        status="failed",
+        range_start=datetime(2026, 7, 1, tzinfo=UTC),
+        range_end=datetime(2026, 7, 2, tzinfo=UTC),
+        error="Original failure",
+        generation_stage="failed",
+        progress=55,
+    )
+    db.add_all([admin, original])
+    await db.commit()
+    result = await api.retry_report(original.id, admin, None, db)
+    await db.refresh(original)
+    assert result["id"] != original.id
+    assert result["retry_of_id"] == original.id
+    assert result["status"] == "queued"
+    assert original.status == "failed"
+    assert original.error == "Original failure"
+
+
+@pytest.mark.asyncio
+async def test_stale_running_report_recovery(db) -> None:
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    stale = ReportRun(
+        period_key="manual:stale",
+        title="Interrupted",
+        status="running",
+        generation_stage="rendering",
+        range_start=now - timedelta(days=1),
+        range_end=now,
+        started_at=now - timedelta(minutes=10),
+    )
+    db.add(stale)
+    await db.commit()
+    assert (
+        await recover_stale_report_runs(db, Settings(report_generation_timeout_seconds=120), now)
+        == 1
+    )
+    assert stale.status == "failed"
+    assert stale.generation_stage == "failed"
+
+
+@pytest.mark.asyncio
+async def test_selected_sections_control_csv_evidence(db) -> None:
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    run = ReportRun(
+        period_key="manual:sections",
+        title="Selected sections",
+        range_start=now - timedelta(days=1),
+        range_end=now,
+        report_options={
+            "description": "",
+            "ranking_limit": 5,
+            "include_previous_period": False,
+            "sections": ["devices"],
+        },
+    )
+    db.add(run)
+    await db.commit()
+    snapshot = await build_report_snapshot(db, run)
+    with zipfile.ZipFile(BytesIO(render_csv_bundle(snapshot))) as archive:
+        assert "manifest.csv" in archive.namelist()
+        assert "top_devices.csv" in archive.namelist()
+        assert "timeseries.csv" not in archive.namelist()
+        assert "distribution_ports.csv" not in archive.namelist()
 
 
 @pytest.mark.asyncio
@@ -295,3 +384,16 @@ async def test_authenticated_download_has_safe_metadata(db) -> None:
     assert response.body == b"%PDFtest"
     assert response.headers["x-tailview-content-sha256"] == "a" * 64
     assert "download-test.pdf" in response.headers["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_demo_reporting_covers_lifecycle_states(db) -> None:
+    db.add(AppUser(username="demo-admin", password_hash="hash", role="administrator"))
+    await db.commit()
+    await seed_demo_reports(db)
+    runs = (await db.scalars(select(ReportRun))).all()
+    assert {run.status for run in runs} == {"completed", "partial", "failed", "running"}
+    retry = next(run for run in runs if run.retry_of_id)
+    assert retry.generation_stage == "rendering"
+    assert await db.scalar(select(func.count()).select_from(ReportSchedule)) == 1
+    assert await db.scalar(select(func.count()).select_from(ReportArtifact)) == 6

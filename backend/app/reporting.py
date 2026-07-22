@@ -10,9 +10,11 @@ import zipfile
 from collections import defaultdict
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
+from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
+from reportlab.graphics.charts.barcharts import HorizontalBarChart
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
 from reportlab.graphics.shapes import Drawing
 from reportlab.lib import colors
@@ -51,13 +53,52 @@ from .saved_views import compatible_state
 
 log = structlog.get_logger()
 RANGE_HOURS = {"24h": 24, "7d": 168, "30d": 720, "90d": 2160, "13mo": 9600}
-REPORT_SCHEMA_VERSION = "1"
+REPORT_SCHEMA_VERSION = "2"
+REPORT_SECTIONS = (
+    "trends",
+    "devices",
+    "pairs",
+    "services",
+    "protocols",
+    "ports",
+    "categories",
+    "resolution",
+    "fleet_context",
+)
+DEFAULT_REPORT_OPTIONS: dict[str, Any] = {
+    "description": "",
+    "ranking_limit": 10,
+    "include_previous_period": True,
+    "sections": list(REPORT_SECTIONS),
+}
+
+
+def normalize_report_options(value: dict[str, Any] | None) -> dict[str, Any]:
+    value = value or {}
+    try:
+        ranking_limit = int(value.get("ranking_limit", 10))
+    except (TypeError, ValueError):
+        ranking_limit = 10
+    sections = [
+        section for section in value.get("sections", REPORT_SECTIONS) if section in REPORT_SECTIONS
+    ]
+    return {
+        "description": str(value.get("description", ""))[:500],
+        "ranking_limit": ranking_limit if ranking_limit in {5, 10, 20} else 10,
+        "include_previous_period": bool(value.get("include_previous_period", True)),
+        "sections": list(dict.fromkeys(sections)) or list(REPORT_SECTIONS),
+    }
 
 
 def aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def iso_aware(value: datetime | None) -> str | None:
+    normalized = aware(value)
+    return normalized.isoformat() if normalized else None
 
 
 def floor_bucket(value: datetime, granularity: str) -> datetime:
@@ -359,6 +400,7 @@ async def aggregate_report_data(
     start: datetime,
     end: datetime,
     filters: dict[str, Any],
+    ranking_limit: int = 20,
 ) -> dict[str, Any]:
     granularity = "daily" if end - start > timedelta(days=90) else "hourly"
     rows = (
@@ -437,11 +479,12 @@ async def aggregate_report_data(
             "record_count": totals[2],
         },
         "series": filled_series,
-        "top_devices": _rank(top_devices, devices),
-        "top_pairs": _rank(top_pairs, {}),
-        "top_services": _rank(top_services, services),
+        "top_devices": _rank(top_devices, devices, ranking_limit),
+        "top_pairs": _rank(top_pairs, {}, ranking_limit),
+        "top_services": _rank(top_services, services, ranking_limit),
         "distributions": {
-            dimension: _rank(values, {}) for dimension, values in distributions.items()
+            dimension: _rank(values, {}, ranking_limit)
+            for dimension, values in distributions.items()
         },
     }
 
@@ -449,6 +492,16 @@ async def aggregate_report_data(
 async def _fleet_snapshot(session: AsyncSession) -> dict[str, Any]:
     devices = (await session.scalars(select(Device).where(Device.active.is_(True)))).all()
     sync_time = await session.scalar(select(func.max(SyncJob.finished_at)))
+    source_freshness = {
+        kind: finished.isoformat() if finished else None
+        for kind, finished in (
+            await session.execute(
+                select(SyncJob.kind, func.max(SyncJob.finished_at))
+                .where(SyncJob.status.in_(["success", "partial_success"]))
+                .group_by(SyncJob.kind)
+            )
+        ).all()
+    }
     return {
         "devices": len(devices),
         "online": sum(device.online is True for device in devices),
@@ -464,6 +517,7 @@ async def _fleet_snapshot(session: AsyncSession) -> dict[str, Any]:
         ),
         "last_synchronization": sync_time.isoformat() if sync_time else None,
         "basis": "current inventory at report generation time",
+        "source_freshness": source_freshness,
     }
 
 
@@ -471,10 +525,18 @@ async def build_report_snapshot(session: AsyncSession, run: ReportRun) -> dict[s
     range_start, range_end = aware(run.range_start), aware(run.range_end)
     if range_start is None or range_end is None:
         raise ValueError("Report range is unavailable")
-    current = await aggregate_report_data(session, range_start, range_end, run.filters)
+    options = normalize_report_options(run.report_options)
+    ranking_limit = int(options["ranking_limit"])
+    current = await aggregate_report_data(
+        session, range_start, range_end, run.filters, ranking_limit
+    )
     duration = range_end - range_start
-    previous = await aggregate_report_data(
-        session, range_start - duration, range_start, run.filters
+    previous = (
+        await aggregate_report_data(
+            session, range_start - duration, range_start, run.filters, ranking_limit
+        )
+        if options["include_previous_period"]
+        else None
     )
     state = await session.get(FlowAggregateState, current["granularity"])
     coverage_start = aware(state.coverage_start) if state else None
@@ -491,28 +553,48 @@ async def build_report_snapshot(session: AsyncSession, run: ReportRun) -> dict[s
         "coverage_end": coverage_end.isoformat() if coverage_end else None,
         "granularity": current["granularity"],
     }
-    comparison = {
-        key: {
-            "current": current["totals"][key],
-            "previous": previous["totals"][key],
-            "change_percent": (
-                round(
-                    (current["totals"][key] - previous["totals"][key])
-                    / previous["totals"][key]
-                    * 100,
-                    2,
-                )
-                if previous["totals"][key]
-                else None
-            ),
+    comparison = (
+        {
+            key: {
+                "current": current["totals"][key],
+                "previous": previous["totals"][key],
+                "change_percent": (
+                    round(
+                        (current["totals"][key] - previous["totals"][key])
+                        / previous["totals"][key]
+                        * 100,
+                        2,
+                    )
+                    if previous["totals"][key]
+                    else None
+                ),
+            }
+            for key in ("reported_bytes", "reported_packets", "record_count")
         }
-        for key in ("reported_bytes", "reported_packets", "record_count")
+        if previous
+        else None
+    )
+    aggregate_states = {
+        item.granularity: {
+            "coverage_start": iso_aware(item.coverage_start),
+            "coverage_end": iso_aware(item.coverage_end),
+            "last_success": iso_aware(item.last_success),
+            "last_error": item.last_error,
+        }
+        for item in (await session.scalars(select(FlowAggregateState))).all()
     }
-    return {
+    settings = get_settings()
+    snapshot = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "report_id": run.id,
         "title": run.title,
+        "description": options["description"],
         "generated_at": datetime.now(UTC).isoformat(),
+        "saved_view": {
+            "id": run.saved_view_id,
+            "revision": run.saved_view_revision,
+        },
+        "report_options": options,
         "range": {"start": range_start.isoformat(), "end": range_end.isoformat()},
         "filters": run.filters,
         "coverage": run.coverage,
@@ -521,10 +603,23 @@ async def build_report_snapshot(session: AsyncSession, run: ReportRun) -> dict[s
             "Volumes are reported bytes and packets, not unique transferred volume."
         ),
         "traffic": current,
-        "previous_period": previous["totals"],
+        "previous_period": previous["totals"] if previous else None,
         "comparison": comparison,
         "fleet": await _fleet_snapshot(session),
+        "aggregate_coverage": aggregate_states,
+        "retention": {
+            "hourly_days": settings.flow_hourly_aggregate_retention_days,
+            "daily_days": settings.flow_daily_aggregate_retention_days,
+            "raw_flow_days": settings.flow_retention_days,
+        },
     }
+    evidence = json.dumps(
+        {"filters": run.filters, "range": snapshot["range"], "traffic": current},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    snapshot["evidence_sha256"] = hashlib.sha256(evidence).hexdigest()
+    return snapshot
 
 
 def _csv_bytes(rows: list[list[Any]]) -> bytes:
@@ -536,17 +631,29 @@ def _csv_bytes(rows: list[list[Any]]) -> bytes:
 def render_csv_bundle(snapshot: dict[str, Any]) -> bytes:
     output = io.BytesIO()
     traffic = snapshot["traffic"]
+    options = normalize_report_options(snapshot.get("report_options"))
+    sections = set(options["sections"])
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
-            "metadata.csv",
+            "manifest.csv",
             _csv_bytes(
                 [
                     ["field", "value"],
+                    ["schema_version", snapshot["schema_version"]],
                     ["report_id", snapshot["report_id"]],
                     ["generated_at", snapshot["generated_at"]],
                     ["range_start", snapshot["range"]["start"]],
                     ["range_end", snapshot["range"]["end"]],
                     ["coverage_complete", snapshot["coverage"]["complete"]],
+                    ["coverage_start", snapshot["coverage"].get("coverage_start")],
+                    ["coverage_end", snapshot["coverage"].get("coverage_end")],
+                    ["saved_view_id", snapshot.get("saved_view", {}).get("id")],
+                    ["saved_view_revision", snapshot.get("saved_view", {}).get("revision")],
+                    ["ranking_limit", options["ranking_limit"]],
+                    ["include_previous_period", options["include_previous_period"]],
+                    ["sections", ",".join(options["sections"])],
+                    ["filters", json.dumps(snapshot.get("filters", {}), sort_keys=True)],
+                    ["evidence_sha256", snapshot.get("evidence_sha256", "")],
                     ["notice", snapshot["notice"]],
                 ]
             ),
@@ -562,33 +669,47 @@ def render_csv_bundle(snapshot: dict[str, Any]) -> bytes:
                         traffic["totals"]["reported_packets"],
                         traffic["totals"]["record_count"],
                     ],
-                    [
-                        "previous",
-                        snapshot["previous_period"]["reported_bytes"],
-                        snapshot["previous_period"]["reported_packets"],
-                        snapshot["previous_period"]["record_count"],
-                    ],
-                ]
-            ),
-        )
-        archive.writestr(
-            "timeseries.csv",
-            _csv_bytes(
-                [
-                    ["bucket_start", "reported_bytes", "reported_packets", "record_count"],
-                    *[
+                    *(
                         [
-                            row["bucket_start"],
-                            row["reported_bytes"],
-                            row["reported_packets"],
-                            row["record_count"],
+                            [
+                                "previous",
+                                snapshot["previous_period"]["reported_bytes"],
+                                snapshot["previous_period"]["reported_packets"],
+                                snapshot["previous_period"]["record_count"],
+                            ]
                         ]
-                        for row in traffic["series"]
-                    ],
+                        if snapshot.get("previous_period")
+                        else []
+                    ),
                 ]
             ),
         )
-        for name in ("top_devices", "top_pairs", "top_services"):
+        if "trends" in sections:
+            archive.writestr(
+                "timeseries.csv",
+                _csv_bytes(
+                    [
+                        ["bucket_start", "reported_bytes", "reported_packets", "record_count"],
+                        *[
+                            [
+                                row["bucket_start"],
+                                row["reported_bytes"],
+                                row["reported_packets"],
+                                row["record_count"],
+                            ]
+                            for row in traffic["series"]
+                        ],
+                    ]
+                ),
+            )
+        entity_sections = {
+            "top_devices": "devices",
+            "top_pairs": "pairs",
+            "top_services": "services",
+        }
+        for name, section in entity_sections.items():
+            if section not in sections:
+                continue
             archive.writestr(
                 f"{name}.csv",
                 _csv_bytes(
@@ -607,7 +728,15 @@ def render_csv_bundle(snapshot: dict[str, Any]) -> bytes:
                     ]
                 ),
             )
+        distribution_sections = {
+            "protocols": "protocols",
+            "ports": "ports",
+            "categories": "categories",
+            "resolution": "resolution",
+        }
         for name, rows in traffic["distributions"].items():
+            if distribution_sections[name] not in sections:
+                continue
             archive.writestr(
                 f"distribution_{name}.csv",
                 _csv_bytes(
@@ -638,6 +767,38 @@ def _human_bytes(value: int) -> str:
     return f"{value} B"
 
 
+def _change_label(comparison: dict[str, Any] | None, key: str) -> str:
+    if not comparison or comparison[key]["change_percent"] is None:
+        return "Previous period unavailable"
+    change = float(comparison[key]["change_percent"])
+    direction = "increase" if change > 0 else "decrease" if change < 0 else "no change"
+    return f"{abs(change):.1f}% {direction}"
+
+
+def _page_footer(canvas: Any, document: Any) -> None:
+    canvas.saveState()
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(colors.HexColor("#526b68"))
+    canvas.drawString(16 * mm, 9 * mm, "TailView · Client-reported network usage")
+    canvas.drawRightString(A4[0] - 16 * mm, 9 * mm, f"Page {document.page}")
+    canvas.restoreState()
+
+
+def _distribution_drawing(rows: list[dict[str, Any]]) -> Drawing:
+    drawing = Drawing(172 * mm, 42 * mm)
+    chart = HorizontalBarChart()
+    chart.x, chart.y, chart.width, chart.height = 42 * mm, 5 * mm, 122 * mm, 32 * mm
+    visible = rows[:8]
+    chart.data = [[row["reported_bytes"] for row in reversed(visible)]]
+    chart.categoryAxis.categoryNames = [row["name"][:24] for row in reversed(visible)]
+    chart.bars[0].fillColor = colors.HexColor("#32c9a5")
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labels.fontSize = 6
+    chart.categoryAxis.labels.fontSize = 6
+    drawing.add(chart)
+    return drawing
+
+
 def render_pdf(snapshot: dict[str, Any]) -> bytes:
     output = io.BytesIO()
     document = SimpleDocTemplate(
@@ -659,14 +820,22 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
             alignment=TA_LEFT,
         )
     )
+    options = normalize_report_options(snapshot.get("report_options"))
+    sections = set(options["sections"])
     story: list[Any] = [
         Paragraph("TAILVIEW · NETWORK USAGE", styles["Heading4"]),
-        Paragraph(snapshot["title"], styles["TailViewTitle"]),
+        Paragraph(escape(snapshot["title"]), styles["TailViewTitle"]),
+        *(
+            [Paragraph(escape(options["description"]), styles["BodyText"]), Spacer(1, 2 * mm)]
+            if options["description"]
+            else []
+        ),
         Paragraph(f"{snapshot['range']['start']} — {snapshot['range']['end']}", styles["Normal"]),
+        Paragraph(f"Generated {snapshot['generated_at']}", styles["Normal"]),
         Spacer(1, 8 * mm),
     ]
     totals = snapshot["traffic"]["totals"]
-    previous = snapshot["previous_period"]
+    comparison = snapshot.get("comparison")
     metrics = Table(
         [
             ["Reported volume", "Reported packets", "Flow records", "Coverage"],
@@ -677,10 +846,10 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
                 "Complete" if snapshot["coverage"]["complete"] else "Partial",
             ],
             [
-                f"Previous: {_human_bytes(previous['reported_bytes'])}",
-                f"Previous: {previous['reported_packets']:,}",
-                f"Previous: {previous['record_count']:,}",
-                "Current vs previous period",
+                _change_label(comparison, "reported_bytes"),
+                _change_label(comparison, "reported_packets"),
+                _change_label(comparison, "record_count"),
+                f"{snapshot['coverage'].get('granularity', 'unknown')} aggregates",
             ],
         ],
         colWidths=[43 * mm] * 4,
@@ -704,7 +873,7 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
     )
     story.extend([metrics, Spacer(1, 8 * mm)])
     series = snapshot["traffic"]["series"]
-    if series:
+    if series and "trends" in sections:
         drawing = Drawing(175 * mm, 55 * mm)
         chart = HorizontalLineChart()
         chart.x, chart.y, chart.width, chart.height = 12 * mm, 8 * mm, 155 * mm, 38 * mm
@@ -712,18 +881,22 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
         chart.lines[0].strokeColor = colors.HexColor("#32c9a5")
         chart.lines[0].strokeWidth = 2
         chart.valueAxis.valueMin = 0
-        chart.categoryAxis.categoryNames = [row["bucket_start"][:10] for row in series]
+        label_step = max(1, len(series) // 8)
+        chart.categoryAxis.categoryNames = [
+            row["bucket_start"][:10] if index % label_step == 0 else ""
+            for index, row in enumerate(series)
+        ]
         chart.categoryAxis.labels.angle = 30
         chart.categoryAxis.labels.fontSize = 6
         drawing.add(chart)
         story.extend([Paragraph("Reported traffic trend", styles["Heading2"]), drawing])
-    for heading, key in (
-        ("Top devices", "top_devices"),
-        ("Top pairs", "top_pairs"),
-        ("Top Services", "top_services"),
+    for heading, key, section in (
+        ("Top devices", "top_devices", "devices"),
+        ("Top pairs", "top_pairs", "pairs"),
+        ("Top Services", "top_services", "services"),
     ):
-        rows = snapshot["traffic"][key][:10]
-        if not rows:
+        rows = snapshot["traffic"][key][: int(options["ranking_limit"])]
+        if not rows or section not in sections:
             continue
         table = Table(
             [
@@ -752,6 +925,49 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
             )
         )
         story.extend([Spacer(1, 5 * mm), KeepTogether(table)])
+    distribution_labels = {
+        "protocols": "Protocols",
+        "ports": "Destination ports",
+        "categories": "Traffic categories",
+        "resolution": "Resolution coverage",
+    }
+    for key, heading in distribution_labels.items():
+        rows = snapshot["traffic"]["distributions"][key]
+        if key not in sections or not rows:
+            continue
+        table = Table(
+            [
+                [heading, "Reported volume", "Records"],
+                *[
+                    [
+                        row["name"],
+                        _human_bytes(row["reported_bytes"]),
+                        f"{row['record_count']:,}",
+                    ]
+                    for row in rows[: int(options["ranking_limit"])]
+                ],
+            ],
+            colWidths=[95 * mm, 42 * mm, 35 * mm],
+            repeatRows=1,
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dff5ef")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#b8d5d0")),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ]
+            )
+        )
+        story.extend(
+            [
+                Spacer(1, 5 * mm),
+                Paragraph(heading, styles["Heading2"]),
+                _distribution_drawing(rows),
+                table,
+            ]
+        )
     story.extend(
         [
             Spacer(1, 7 * mm),
@@ -765,9 +981,39 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
                 styles["BodyText"],
             ),
             Paragraph(f"Fleet values are {snapshot['fleet']['basis']}.", styles["BodyText"]),
+            Paragraph(
+                "Aggregate updates may lag recently received flow windows; see the JSON or CSV "
+                "manifest for per-granularity freshness and retention boundaries.",
+                styles["BodyText"],
+            ),
         ]
     )
-    document.build(story)
+    if "fleet_context" in sections:
+        fleet = snapshot["fleet"]
+        story.extend(
+            [
+                Paragraph("Current fleet context", styles["Heading2"]),
+                Table(
+                    [
+                        ["Devices", "Online", "Users", "Routes", "Services"],
+                        [
+                            fleet["devices"],
+                            fleet["online"],
+                            fleet["users"],
+                            fleet["routes"],
+                            fleet["services"],
+                        ],
+                    ],
+                    colWidths=[34 * mm] * 5,
+                    style=[
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dff5ef")),
+                        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#b8d5d0")),
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ],
+                ),
+            ]
+        )
+    document.build(story, onFirstPage=_page_footer, onLaterPages=_page_footer)
     return output.getvalue()
 
 
@@ -792,6 +1038,8 @@ def artifact_payloads(snapshot: dict[str, Any]) -> dict[str, tuple[str, str, byt
 
 async def generate_report(session: AsyncSession, run: ReportRun, settings: Settings) -> None:
     run.status = "running"
+    run.generation_stage = "aggregating"
+    run.progress = 10
     run.started_at = datetime.now(UTC)
     run.error = ""
     await session.commit()
@@ -799,12 +1047,17 @@ async def generate_report(session: AsyncSession, run: ReportRun, settings: Setti
 
         async def assemble() -> tuple[dict[str, Any], dict[str, tuple[str, str, bytes]]]:
             snapshot_value = await build_report_snapshot(session, run)
+            run.generation_stage = "rendering"
+            run.progress = 55
+            await session.commit()
             artifact_values = await asyncio.to_thread(artifact_payloads, snapshot_value)
             return snapshot_value, artifact_values
 
         snapshot, artifacts = await asyncio.wait_for(
             assemble(), timeout=settings.report_generation_timeout_seconds
         )
+        run.generation_stage = "storing"
+        run.progress = 85
         for format_name, (content_type, filename, content) in artifacts.items():
             if len(content) > settings.report_max_artifact_bytes:
                 raise ValueError(f"{format_name.upper()} artifact exceeds configured size limit")
@@ -820,7 +1073,10 @@ async def generate_report(session: AsyncSession, run: ReportRun, settings: Setti
                 )
             )
         run.snapshot = snapshot
+        run.snapshot_schema_version = int(REPORT_SCHEMA_VERSION)
         run.status = "completed" if run.coverage.get("complete") else "partial"
+        run.generation_stage = "completed"
+        run.progress = 100
         run.completed_at = datetime.now(UTC)
         await session.commit()
     except Exception as exc:
@@ -828,10 +1084,34 @@ async def generate_report(session: AsyncSession, run: ReportRun, settings: Setti
         failed = await session.get(ReportRun, run.id)
         if failed:
             failed.status = "failed"
+            failed.generation_stage = "failed"
             failed.error = f"Report generation failed ({type(exc).__name__})"[:255]
             failed.completed_at = datetime.now(UTC)
             await session.commit()
         raise
+
+
+async def recover_stale_report_runs(
+    session: AsyncSession, settings: Settings, now: datetime
+) -> int:
+    cutoff = now - timedelta(seconds=settings.report_generation_timeout_seconds)
+    rows = (
+        await session.scalars(
+            select(ReportRun).where(
+                ReportRun.status == "running",
+                ReportRun.started_at.is_not(None),
+                ReportRun.started_at < cutoff,
+            )
+        )
+    ).all()
+    for run in rows:
+        run.status = "failed"
+        run.generation_stage = "failed"
+        run.error = "Report generation was interrupted and exceeded the configured timeout"
+        run.completed_at = now
+    if rows:
+        await session.commit()
+    return len(rows)
 
 
 async def _generate_report_id(report_id: str, settings: Settings) -> None:
@@ -867,6 +1147,8 @@ async def enqueue_schedule_run(
         schedule_id=schedule.id,
         saved_view_id=view.id,
         saved_view_revision=view.revision,
+        report_options=normalize_report_options(schedule.report_options),
+        snapshot_schema_version=int(REPORT_SCHEMA_VERSION),
         requested_by=schedule.created_by,
         title=f"{schedule.name} · {end.date().isoformat()}",
         status="queued",
@@ -892,6 +1174,9 @@ async def reporting_cycle(now: datetime | None = None) -> None:
             if not acquired:
                 return
         async with SessionLocal() as session:
+            recovered = await recover_stale_report_runs(session, settings, now)
+            if recovered:
+                log.warning("stale_report_runs_recovered", count=recovered)
             due = (
                 await session.scalars(
                     select(ReportSchedule).where(
@@ -972,7 +1257,12 @@ def manual_period(range_name: str, end: datetime) -> tuple[datetime, datetime]:
 
 
 def new_manual_run(
-    view: SavedView, user_id: str, range_name: str, title: str, now: datetime
+    view: SavedView,
+    user_id: str,
+    range_name: str,
+    title: str,
+    now: datetime,
+    report_options: dict[str, Any] | None = None,
 ) -> ReportRun:
     start, end = manual_period(range_name, now)
     return ReportRun(
@@ -984,4 +1274,28 @@ def new_manual_run(
         range_start=start,
         range_end=end,
         filters={key: value for key, value in view.state.items() if key != "range"},
+        report_options=normalize_report_options(report_options),
+        snapshot_schema_version=int(REPORT_SCHEMA_VERSION),
+        generation_stage="queued",
+        progress=0,
+    )
+
+
+def new_retry_run(run: ReportRun, user_id: str, now: datetime) -> ReportRun:
+    return ReportRun(
+        period_key=f"retry:{run.id}:{uuid.uuid4()}",
+        retry_of_id=run.id,
+        schedule_id=run.schedule_id,
+        saved_view_id=run.saved_view_id,
+        saved_view_revision=run.saved_view_revision,
+        requested_by=user_id,
+        title=run.title,
+        range_start=run.range_start,
+        range_end=run.range_end,
+        filters=dict(run.filters),
+        report_options=normalize_report_options(run.report_options),
+        snapshot_schema_version=int(REPORT_SCHEMA_VERSION),
+        generation_stage="queued",
+        progress=0,
+        created_at=now,
     )

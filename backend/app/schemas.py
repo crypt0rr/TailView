@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SetupRequest(BaseModel):
@@ -103,10 +103,56 @@ class SavedViewDefaultRequest(BaseModel):
     view_id: str | None = Field(default=None, max_length=36)
 
 
+ReportSection = Literal[
+    "trends",
+    "devices",
+    "pairs",
+    "services",
+    "protocols",
+    "ports",
+    "categories",
+    "resolution",
+    "fleet_context",
+]
+
+REPORT_SECTIONS: tuple[ReportSection, ...] = (
+    "trends",
+    "devices",
+    "pairs",
+    "services",
+    "protocols",
+    "ports",
+    "categories",
+    "resolution",
+    "fleet_context",
+)
+
+
+def default_report_sections() -> list[ReportSection]:
+    return list(REPORT_SECTIONS)
+
+
+class ReportOptions(BaseModel):
+    description: str = Field(default="", max_length=500)
+    ranking_limit: Literal[5, 10, 20] = 10
+    include_previous_period: bool = True
+    sections: list[ReportSection] = Field(
+        default_factory=default_report_sections, min_length=1, max_length=9
+    )
+
+    @field_validator("sections")
+    @classmethod
+    def unique_sections(cls, value: list[ReportSection]) -> list[ReportSection]:
+        if len(value) != len(set(value)):
+            raise ValueError("Report sections must be unique")
+        return value
+
+
 class ReportGenerateRequest(BaseModel):
     saved_view_id: str = Field(min_length=1, max_length=36)
     range: Literal["24h", "7d", "30d", "90d", "13mo"] | None = None
     title: str = Field(default="", max_length=255)
+    report_options: ReportOptions = Field(default_factory=ReportOptions)
 
 
 class ReportScheduleRequest(BaseModel):
@@ -118,6 +164,7 @@ class ReportScheduleRequest(BaseModel):
     weekday: int | None = Field(default=None, ge=0, le=6)
     month_day: int | None = Field(default=None, ge=1, le=28)
     enabled: bool = True
+    report_options: ReportOptions = Field(default_factory=ReportOptions)
 
 
 class Page(BaseModel):

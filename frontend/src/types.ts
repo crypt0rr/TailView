@@ -438,6 +438,24 @@ export interface ReportArtifactMetadata {
   size: number;
 }
 
+export type ReportSection =
+  | "trends"
+  | "devices"
+  | "pairs"
+  | "services"
+  | "protocols"
+  | "ports"
+  | "categories"
+  | "resolution"
+  | "fleet_context";
+
+export interface ReportOptions {
+  description: string;
+  ranking_limit: 5 | 10 | 20;
+  include_previous_period: boolean;
+  sections: ReportSection[];
+}
+
 export interface NetworkReport {
   id: string;
   title: string;
@@ -445,6 +463,11 @@ export interface NetworkReport {
   schedule_id: string | null;
   saved_view_id: string | null;
   saved_view_revision: number | null;
+  retry_of_id: string | null;
+  report_options: ReportOptions;
+  snapshot_schema_version: number;
+  generation_stage: "queued" | "aggregating" | "rendering" | "storing" | "completed" | "failed";
+  progress: number;
   range_start: string;
   range_end: string;
   filters: Record<string, unknown>;
@@ -472,4 +495,13 @@ export interface ReportScheduleRecord {
   last_error: string;
   created_at: string;
   updated_at: string;
+  report_options: ReportOptions;
+  recent_runs?: Array<{
+    id: string;
+    title: string;
+    status: NetworkReport["status"];
+    created_at: string;
+    completed_at: string | null;
+    retry_of_id: string | null;
+  }>;
 }

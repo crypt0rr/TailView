@@ -79,7 +79,7 @@ Python 3.13 is required for local backend work. The Docker build supplies the co
 
 `EXPORT_ROW_LIMIT` controls the maximum number of matching records in CSV and JSON exports and defaults to 10,000. Export responses include limit and truncation headers.
 
-Network reporting retains hourly aggregates for 90 days and daily aggregates for 400 days by default. Completed report artifacts are retained for 180 days. Administrators create schedules under **Reports**; all authenticated TailView users can inspect and download completed reports. Volumes remain client-reported and potentially overlapping.
+Network reporting retains hourly aggregates for 90 days and daily aggregates for 400 days by default. Completed report artifacts are retained for 180 days. Administrators create schedules under **Reports**, select the included evidence sections and comparison behavior, and can inspect immutable failed and retried runs. All authenticated TailView users can inspect and download completed reports. PDF, JSON v2, and CSV evidence share one canonical snapshot; older schema-v1 artifacts remain downloadable. Volumes remain client-reported and potentially overlapping.
 
 Resolved findings and notification delivery history are retained for 180 days by default (`FINDINGS_RETENTION_DAYS`). Webhook destinations require public HTTPS in production. Private destinations must be explicitly constrained with `ALERT_WEBHOOK_HOST_ALLOWLIST`.
 

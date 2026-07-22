@@ -344,6 +344,7 @@ class ReportSchedule(Base):
     local_time: Mapped[str] = mapped_column(String(5), default="08:00")
     weekday: Mapped[int | None] = mapped_column(Integer)
     month_day: Mapped[int | None] = mapped_column(Integer)
+    report_options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_by: Mapped[str] = mapped_column(ForeignKey("app_users.id"))
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -370,6 +371,9 @@ class ReportRun(Base):
         ForeignKey("saved_views.id", ondelete="SET NULL"), index=True
     )
     saved_view_revision: Mapped[int | None] = mapped_column(Integer)
+    retry_of_id: Mapped[str | None] = mapped_column(
+        ForeignKey("report_runs.id", ondelete="SET NULL"), index=True
+    )
     requested_by: Mapped[str | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")
     )
@@ -378,6 +382,10 @@ class ReportRun(Base):
     range_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     range_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     filters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    report_options: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    snapshot_schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    generation_stage: Mapped[str] = mapped_column(String(32), default="queued")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     coverage: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str] = mapped_column(String(255), default="")
