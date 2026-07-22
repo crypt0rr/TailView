@@ -573,7 +573,7 @@ export function AccessGovernance() {
     {tab === "invites" && <GovernanceInvites rows={invites.data?.items ?? []} status={capabilityStatus("invites")} />}
     {tab === "contacts" && <GovernanceContacts rows={contacts.data?.items ?? []} status={capabilityStatus("contacts")} />}
     {tab === "streams" && <GovernanceStreams rows={streams.data?.items ?? []} status={capabilityStatus("log_streaming")} />}
-    <Card className="security-limitations"><CardHead title="Source coverage" detail="Each read surface synchronizes independently" /><div className="compact-list">{Object.entries(data.capabilities).map(([name, capability]) => <div key={name}><span><strong>{name.replaceAll("_", " ")}</strong><small className="block">{capability.required_scope}</small></span><Badge tone={capability.status === "available" ? "success" : "warning"}>{capability.status.replaceAll("_", " ")}</Badge></div>)}</div></Card>
+    <Card className="security-limitations source-coverage-card"><CardHead title="Source coverage" detail="Each read surface synchronizes independently" /><div className="compact-list source-coverage-list">{Object.entries(data.capabilities).map(([name, capability]) => <div key={name}><span><strong>{name.replaceAll("_", " ")}</strong><small className="block">{capability.required_scope}</small></span><Badge tone={capability.status === "available" ? "success" : "warning"}>{capability.status.replaceAll("_", " ")}</Badge></div>)}</div></Card>
   </div>;
 }
 

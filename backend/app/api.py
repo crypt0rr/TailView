@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy import String, and_, cast, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import auth
@@ -517,6 +517,7 @@ def _device_query(
         select(Device, LocalMetadata, TailnetUser, sort_key.label("sort_key"))
         .outerjoin(LocalMetadata)
         .outerjoin(TailnetUser, Device.owner_id == TailnetUser.id)
+        .where(Device.active.is_(True))
         .order_by(sort_key, Device.id)
     )
     if search:
@@ -530,7 +531,12 @@ def _device_query(
             )
         )
     if role:
-        query = query.where(Device.primary_role == role)
+        query = query.where(
+            or_(
+                Device.primary_role == role,
+                cast(Device.roles, String).like(f'%"{role}"%'),
+            )
+        )
     if status_filter:
         if status_filter not in {"online", "offline", "unknown"}:
             raise HTTPException(422, "status must be online, offline, or unknown")

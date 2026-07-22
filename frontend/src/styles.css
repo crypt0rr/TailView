@@ -2066,6 +2066,45 @@ td small {
   padding: 15px 18px;
   border-bottom: 1px solid var(--border);
 }
+
+.source-coverage-list {
+  gap: 0;
+  padding: 4px 18px 8px;
+}
+
+.source-coverage-list > div {
+  min-width: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.source-coverage-list > div:last-child {
+  border-bottom: 0;
+}
+
+.source-coverage-list > div > span {
+  min-width: 0;
+}
+
+.source-coverage-list strong {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  text-transform: capitalize;
+}
+
+.source-coverage-list small {
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.source-coverage-list .badge {
+  flex: 0 0 auto;
+  margin-left: 14px;
+}
 .security-limitations ul {
   margin: 0;
   padding: 14px 34px 17px;
@@ -2080,6 +2119,9 @@ td small {
   .security-finding-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .source-coverage-list > div {
+    align-items: flex-start;
   }
 }
 .settings-grid {
