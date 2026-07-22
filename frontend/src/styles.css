@@ -748,6 +748,8 @@ aside nav {
   flex-direction: column;
   gap: 2px;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 aside nav button {
   display: flex;
@@ -760,10 +762,16 @@ aside nav button {
   padding: 8px 11px;
   font-size: 12px;
   text-align: left;
+  width: 100%;
+  min-height: 40px;
+  flex: 0 0 auto;
 }
 aside nav button svg {
   width: 17px;
   flex: none;
+}
+aside nav button > span {
+  min-width: 0;
 }
 aside nav button:hover,
 aside nav button.active {
@@ -1594,6 +1602,15 @@ aside nav .inactive-nav-item {
 }
 .table-card {
   overflow: hidden;
+}
+.table-card > .card-head {
+  margin-bottom: 0;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.table-card > .compact-list,
+.table-card > .security-findings {
+  padding: 16px 18px 18px;
 }
 .table-scroll {
   overflow: auto;

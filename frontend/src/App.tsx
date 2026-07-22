@@ -502,7 +502,7 @@ export function Shell({
                 navigate(path);
                 setMobile(false);
               }}
-              title={label}
+              title={collapsed ? label : undefined}
             >
               <Icon />
               <span>{label}</span>
@@ -520,7 +520,7 @@ export function Shell({
                 className="inactive-nav-toggle"
                 aria-expanded={inactiveOpen}
                 onClick={() => setShowInactive((value) => !value)}
-                title="Not in use"
+                title={collapsed ? "Not in use" : undefined}
               >
                 <ChevronRight className={inactiveOpen ? "expanded" : ""} />
                 <span>Not in use ({partitionedNav.inactive.length})</span>
@@ -533,7 +533,9 @@ export function Shell({
                     navigate(path);
                     setMobile(false);
                   }}
-                  title={`${label}: ${capability.status.replaceAll("_", " ")}. ${capability.detail || capability.requirement}`}
+                  title={collapsed
+                    ? `${label}: ${capability.status.replaceAll("_", " ")}. ${capability.detail || capability.requirement}`
+                    : undefined}
                 >
                   <Icon />
                   <span><strong>{label}</strong><small>{capability.status.replaceAll("_", " ")}</small></span>

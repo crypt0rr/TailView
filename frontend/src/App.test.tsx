@@ -123,6 +123,11 @@ describe("TailView", () => {
       </QueryClientProvider>,
     );
 
+    const dashboardNavigation = screen.getByRole("button", { name: "Dashboard" });
+    expect(dashboardNavigation).not.toHaveAttribute("title");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle sidebar" }));
+    expect(dashboardNavigation).toHaveAttribute("title", "Dashboard");
+
     fireEvent.click(screen.getByTitle("Log out"));
     await waitFor(() => expect(screen.getByText("Welcome back")).toBeTruthy());
     expect(logout).toHaveBeenCalledOnce();
