@@ -2502,6 +2502,46 @@ td small {
 .saved-view-list small {
   display: block;
 }
+
+.report-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+.report-summary-grid .card { display: grid; gap: 6px; padding: 20px; }
+.report-summary-grid strong { font-size: 2rem; }
+.report-summary-grid span, .report-summary-grid small { color: var(--muted); }
+.report-builder { padding: 20px; }
+.report-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) minmax(140px, 1fr) minmax(220px, 2fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 16px;
+}
+.report-form label { display: grid; gap: 6px; color: var(--muted); font-size: .82rem; }
+.schedule-form { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
+.report-list-head { display: flex; align-items: center; justify-content: space-between; }
+.report-list-head select { width: 190px; }
+.schedule-list { display: grid; gap: 10px; }
+.schedule-list .card { display: flex; gap: 12px; align-items: center; padding: 16px; }
+.schedule-list .card > div { flex: 1; }
+.schedule-list p, .schedule-list small { margin: 4px 0 0; color: var(--muted); }
+.report-drawer { width: min(720px, 100vw); }
+.report-detail-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 20px 0; }
+.report-detail-metrics > div { padding: 14px; border: 1px solid var(--border); border-radius: 10px; display: grid; gap: 5px; }
+.report-detail-metrics span { color: var(--muted); font-size: .78rem; }
+.report-detail-metrics strong { font-size: 1.25rem; }
+.report-downloads { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0; }
+.report-downloads a { text-decoration: none; }
+.report-downloads small { color: inherit; opacity: .7; }
+.report-rank { display: flex; justify-content: space-between; gap: 15px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+
+@media (max-width: 850px) {
+  .report-summary-grid, .report-detail-metrics { grid-template-columns: 1fr; }
+  .report-form, .schedule-form { grid-template-columns: 1fr; }
+  .schedule-list .card { align-items: stretch; flex-direction: column; }
+}
 .mobile-only {
   display: none;
 }

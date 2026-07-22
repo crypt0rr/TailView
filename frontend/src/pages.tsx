@@ -15,6 +15,7 @@ import {
   ChevronRight,
   CircleDot,
   Clock3,
+  CalendarClock,
   Copy,
   Download,
   Eye,
@@ -27,6 +28,8 @@ import {
   Maximize2,
   Network,
   RefreshCw,
+  FileChartColumn,
+  Play,
   Search,
   ShieldCheck,
   SlidersHorizontal,
@@ -76,6 +79,9 @@ import type {
   FlowSummary,
   FindingRecord,
   FindingSummary,
+  NetworkReport,
+  ReportScheduleRecord,
+  SavedViewRecord,
   GovernanceCredential,
   GovernanceSummary,
   ObservedPhysicalEndpoint,
@@ -134,6 +140,14 @@ export function Dashboard() {
         ))}
       </div>
       <div className="dashboard-grid">
+        <Card className="findings-dashboard-card wide">
+          <CardHead
+            title="Latest network report"
+            detail={d.latest_report ? `${new Date(d.latest_report.range_start).toLocaleDateString()} – ${new Date(d.latest_report.range_end).toLocaleDateString()}` : "No generated reports yet"}
+            action={<Link to="/reports">Open reports <ChevronRight /></Link>}
+          />
+          {d.latest_report ? <div className="findings-dashboard-summary"><strong>{formatBytes(d.latest_report.reported_bytes)}</strong><span>reported volume</span><Badge tone={d.latest_report.coverage_complete ? "success" : "warning"}>{d.latest_report.coverage_complete ? "complete coverage" : "partial coverage"}</Badge></div> : <p className="muted">Administrators can generate repeatable reports from saved Flow views.</p>}
+        </Card>
         <Card className="findings-dashboard-card wide">
           <CardHead
             title="Findings"
@@ -3236,6 +3250,133 @@ export function SettingsPage({ user }: { user: { role: string } }) {
       </div>
     </div>
   );
+}
+
+type ReportsUser = { role: "administrator" | "viewer" };
+
+export function Reports({ user }: { user: ReportsUser }) {
+  const queryClient = useQueryClient();
+  const [selectedId, setSelectedId] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [tab, setTab] = useState<"reports" | "schedules">("reports");
+  const [generateForm, setGenerateForm] = useState({ saved_view_id: "", range: "30d", title: "" });
+  const [scheduleForm, setScheduleForm] = useState({
+    name: "", saved_view_id: "", frequency: "weekly", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    local_time: "08:00", weekday: 1, month_day: 1, enabled: true,
+  });
+  const summary = useQuery({
+    queryKey: ["reports-summary"],
+    queryFn: () => request<{ counts: Record<string, number>; latest: NetworkReport | null }>("/reports/summary"),
+    refetchInterval: 30_000,
+  });
+  const reports = useInfiniteQuery({
+    queryKey: ["reports", statusFilter],
+    initialPageParam: "",
+    queryFn: ({ pageParam }) => request<Page<NetworkReport>>(`/reports?limit=50${statusFilter ? `&status=${statusFilter}` : ""}${pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : ""}`),
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    refetchInterval: 30_000,
+  });
+  const detail = useQuery({
+    queryKey: ["report", selectedId],
+    queryFn: () => request<NetworkReport>(`/reports/${selectedId}`),
+    enabled: Boolean(selectedId),
+    refetchInterval: (query) => ["queued", "running"].includes((query.state.data as NetworkReport | undefined)?.status ?? "") ? 5_000 : false,
+  });
+  const schedules = useQuery({
+    queryKey: ["report-schedules"],
+    queryFn: () => request<{ items: ReportScheduleRecord[] }>("/report-schedules"),
+    enabled: user.role === "administrator",
+  });
+  const savedViews = useQuery({
+    queryKey: ["saved-views", "reporting"],
+    queryFn: () => request<{ items: SavedViewRecord[] }>("/saved-views?page=flows"),
+    enabled: user.role === "administrator",
+  });
+  const refresh = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["reports"] }),
+      queryClient.invalidateQueries({ queryKey: ["reports-summary"] }),
+      queryClient.invalidateQueries({ queryKey: ["report-schedules"] }),
+    ]);
+  };
+  const action = useMutation({
+    mutationFn: ({ path, method = "POST", body }: { path: string; method?: string; body?: unknown }) => request(path, { method, body: body === undefined ? undefined : JSON.stringify(body) }),
+    onSuccess: refresh,
+  });
+  const reportRows = reports.data?.pages.flatMap((page) => page.items) ?? [];
+  const report = detail.data;
+  const snapshot = report?.snapshot as any;
+  const submitGenerate = (event: React.FormEvent) => {
+    event.preventDefault();
+    action.mutate({ path: "/reports/generate", body: generateForm });
+  };
+  const submitSchedule = (event: React.FormEvent) => {
+    event.preventDefault();
+    action.mutate({ path: "/report-schedules", body: scheduleForm });
+  };
+  return <div className="page reports-page">
+    <PageHead eyebrow="NETWORK REPORTING" title="Reports" description="Durable reported-traffic trends with authenticated PDF, JSON, and CSV evidence." actions={<Badge tone="success"><FileChartColumn /> 13-month history</Badge>} />
+    <div className="report-summary-grid">
+      <Card><span>Completed</span><strong>{(summary.data?.counts.completed ?? 0) + (summary.data?.counts.partial ?? 0)}</strong><small>Shared with signed-in users</small></Card>
+      <Card><span>Queued / running</span><strong>{(summary.data?.counts.queued ?? 0) + (summary.data?.counts.running ?? 0)}</strong><small>Generated by the reporting worker</small></Card>
+      <Card><span>Failed</span><strong>{summary.data?.counts.failed ?? 0}</strong><small>Administrators can retry</small></Card>
+    </div>
+    {user.role === "administrator" && <div className="tabs" role="tablist" aria-label="Report workspace"><button className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")}>Reports</button><button className={tab === "schedules" ? "active" : ""} onClick={() => setTab("schedules")}>Schedules</button></div>}
+    {tab === "reports" ? <>
+      {user.role === "administrator" && <Card className="report-builder"><CardHead title="Generate network report" detail="The current revision of the selected saved Flow view supplies the filters." /><form onSubmit={submitGenerate} className="report-form">
+        <label>Saved Flow view<select aria-label="Report saved Flow view" value={generateForm.saved_view_id} onChange={(event) => setGenerateForm({ ...generateForm, saved_view_id: event.target.value })} required><option value="">Select a view…</option>{(savedViews.data?.items ?? []).filter((view) => view.compatible).map((view) => <option value={view.id} key={view.id}>{view.name} · {view.owner.username}</option>)}</select></label>
+        <label>Range<select value={generateForm.range} onChange={(event) => setGenerateForm({ ...generateForm, range: event.target.value })}><option value="24h">24 hours</option><option value="7d">7 days</option><option value="30d">30 days</option><option value="90d">90 days</option><option value="13mo">13 months</option></select></label>
+        <label>Title<input value={generateForm.title} placeholder="Optional report title" maxLength={255} onChange={(event) => setGenerateForm({ ...generateForm, title: event.target.value })} /></label>
+        <Button type="submit" disabled={!generateForm.saved_view_id || action.isPending}><Play /> Queue report</Button>
+      </form>{action.error && <p className="form-error">{action.error.message}</p>}</Card>}
+      <div className="report-list-head"><h2>Report history</h2><select aria-label="Report status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option>{["queued", "running", "completed", "partial", "failed"].map((value) => <option value={value} key={value}>{value}</option>)}</select></div>
+      {reports.isLoading ? <Loading /> : reports.error ? <ErrorState error={reports.error} /> : reportRows.length === 0 ? <Empty title="No reports yet" detail="An Administrator can generate a report from a saved Flow view." /> : <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Report</th><th>Range</th><th>Status</th><th>Coverage</th><th>Generated</th><th>Formats</th></tr></thead><tbody>{reportRows.map((row) => <tr key={row.id} className="clickable-row" onClick={() => setSelectedId(row.id)}><td><strong>{row.title}</strong><small className="block">{row.saved_view_revision ? `Saved view revision ${row.saved_view_revision}` : "Saved view unavailable"}</small></td><td>{new Date(row.range_start).toLocaleDateString()} – {new Date(row.range_end).toLocaleDateString()}</td><td><Badge tone={row.status === "completed" ? "success" : row.status === "failed" ? "danger" : "warning"}>{row.status}</Badge></td><td>{row.coverage.complete ? "Complete" : "Partial"}</td><td>{relativeTime(row.completed_at ?? row.created_at)}</td><td>{row.artifacts.map((artifact) => artifact.format.toUpperCase()).join(" · ") || "Pending"}</td></tr>)}</tbody></table></div>{reports.hasNextPage && <Button variant="secondary" onClick={() => void reports.fetchNextPage()}>Load more</Button>}</Card>}
+    </> : <>
+      <Card className="report-builder"><CardHead title="New report schedule" detail="Daily, weekly, and monthly schedules use the selected IANA timezone." /><form onSubmit={submitSchedule} className="report-form schedule-form">
+        <label>Name<input value={scheduleForm.name} maxLength={128} onChange={(event) => setScheduleForm({ ...scheduleForm, name: event.target.value })} required /></label>
+        <label>Saved Flow view<select value={scheduleForm.saved_view_id} onChange={(event) => setScheduleForm({ ...scheduleForm, saved_view_id: event.target.value })} required><option value="">Select a view…</option>{(savedViews.data?.items ?? []).filter((view) => view.compatible).map((view) => <option value={view.id} key={view.id}>{view.name}</option>)}</select></label>
+        <label>Frequency<select value={scheduleForm.frequency} onChange={(event) => setScheduleForm({ ...scheduleForm, frequency: event.target.value })}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option></select></label>
+        <label>Timezone<input value={scheduleForm.timezone} onChange={(event) => setScheduleForm({ ...scheduleForm, timezone: event.target.value })} required /></label>
+        <label>Time<input type="time" value={scheduleForm.local_time} onChange={(event) => setScheduleForm({ ...scheduleForm, local_time: event.target.value })} required /></label>
+        {scheduleForm.frequency === "weekly" && <label>Weekday<select value={scheduleForm.weekday} onChange={(event) => setScheduleForm({ ...scheduleForm, weekday: Number(event.target.value) })}>{["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day, index) => <option value={index} key={day}>{day}</option>)}</select></label>}
+        {scheduleForm.frequency === "monthly" && <label>Month day<input type="number" min={1} max={28} value={scheduleForm.month_day} onChange={(event) => setScheduleForm({ ...scheduleForm, month_day: Number(event.target.value) })} /></label>}
+        <Button type="submit" disabled={!scheduleForm.name || !scheduleForm.saved_view_id || action.isPending}><CalendarClock /> Create schedule</Button>
+      </form>{action.error && <p className="form-error">{action.error.message}</p>}</Card>
+      {!schedules.data?.items.length ? <Empty title="No report schedules" detail="Create a schedule to retain consistent daily, weekly, or monthly evidence." /> : <div className="schedule-list">{schedules.data?.items.map((schedule) => <Card key={schedule.id}><div><strong>{schedule.name}</strong><p>{schedule.frequency} at {schedule.local_time} · {schedule.timezone}</p><small>{schedule.last_error || (schedule.next_run_at ? `Next ${relativeTime(schedule.next_run_at)}` : "Paused")}</small></div><Badge tone={schedule.enabled ? "success" : "neutral"}>{schedule.enabled ? "enabled" : "paused"}</Badge><Button variant="ghost" onClick={() => action.mutate({ path: `/report-schedules/${schedule.id}/run` })}>Run now</Button><Button variant="ghost" onClick={() => action.mutate({ path: `/report-schedules/${schedule.id}`, method: "PUT", body: { name: schedule.name, saved_view_id: schedule.saved_view_id, frequency: schedule.frequency, timezone: schedule.timezone, local_time: schedule.local_time, weekday: schedule.weekday, month_day: schedule.month_day, enabled: !schedule.enabled } })}>{schedule.enabled ? "Pause" : "Resume"}</Button><Button variant="ghost" onClick={() => { if (window.confirm(`Delete report schedule “${schedule.name}”?`)) action.mutate({ path: `/report-schedules/${schedule.id}`, method: "DELETE" }); }}>Delete</Button></Card>)}</div>}
+    </>}
+    {selectedId && <div className="drawer-backdrop" onMouseDown={() => setSelectedId("")}>
+      <aside className="details-drawer report-drawer" onMouseDown={(event) => event.stopPropagation()} aria-label="Report details">
+        <button className="drawer-close" aria-label="Close report" onClick={() => setSelectedId("")}><X /></button>
+        {detail.isLoading ? <Loading /> : detail.error ? <ErrorState error={detail.error} /> : report ? <>
+          <p className="eyebrow">NETWORK REPORT</p>
+          <h2>{report.title}</h2>
+          <Badge tone={report.status === "completed" ? "success" : report.status === "failed" ? "danger" : "warning"}>{report.status}</Badge>
+          {report.error && <p className="form-error">{report.error}</p>}
+          {snapshot && <>
+            <div className="report-detail-metrics">
+              <div><span>Reported volume</span><strong>{formatBytes(snapshot.traffic.totals.reported_bytes)}</strong></div>
+              <div><span>Packets</span><strong>{Number(snapshot.traffic.totals.reported_packets).toLocaleString()}</strong></div>
+              <div><span>Records</span><strong>{Number(snapshot.traffic.totals.record_count).toLocaleString()}</strong></div>
+            </div>
+            <p className="reliability-notice">{snapshot.notice}</p>
+            {snapshot.traffic.series.length > 0 && <ResponsiveContainer width="100%" height={220}>
+              <AreaChart data={snapshot.traffic.series}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="bucket_start" tickFormatter={(value) => new Date(value).toLocaleDateString()} />
+                <YAxis tickFormatter={(value) => formatBytes(value)} />
+                <Tooltip formatter={(value) => formatBytes(Number(value))} />
+                <Area type="monotone" dataKey="reported_bytes" stroke="#5be7c4" fill="#5be7c433" />
+              </AreaChart>
+            </ResponsiveContainer>}
+            <h3>Top devices</h3>
+            {snapshot.traffic.top_devices.slice(0, 10).map((item: any) => <div className="report-rank" key={item.id}><span>{item.name}</span><strong>{formatBytes(item.reported_bytes)}</strong></div>)}
+          </>}
+          <div className="report-downloads">{report.artifacts.map((artifact) => <a className="button secondary" href={`/api/v1/reports/${report.id}/download?format=${artifact.format}`} key={artifact.format}><Download /> {artifact.format.toUpperCase()} <small>{formatBytes(artifact.size)}</small></a>)}</div>
+          {user.role === "administrator" && report.status === "failed" && <Button onClick={() => action.mutate({ path: `/reports/${report.id}/retry` })}><RefreshCw /> Retry report</Button>}
+        </> : null}
+      </aside>
+    </div>}
+  </div>;
 }
 
 function PageHead({

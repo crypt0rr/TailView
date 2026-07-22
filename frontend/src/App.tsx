@@ -15,6 +15,7 @@ import {
   ChevronRight,
   CircleUserRound,
   FileKey2,
+  FileChartColumn,
   Gauge,
   GitBranch,
   Globe2,
@@ -49,6 +50,7 @@ import {
   Findings,
   InventoryPage,
   Policy,
+  Reports,
   SettingsPage,
   Services,
   SecurityPosture,
@@ -62,6 +64,7 @@ export const nav = [
   ["Dashboard", "/", LayoutDashboard],
   ["Topology", "/topology", Network],
   ["Flows", "/flows", Activity],
+  ["Reports", "/reports", FileChartColumn],
   ["Devices", "/devices", Server],
   ["Users", "/users", Users],
   ["Groups", "/groups", Boxes],
@@ -592,6 +595,7 @@ export function Shell({
             <Route path="/" element={<Dashboard />} />
             <Route path="/topology" element={<Topology />} />
             <Route path="/flows" element={<Flows />} />
+            <Route path="/reports" element={<Reports user={user} />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/users" element={<InventoryPage kind="users" />} />
             <Route path="/groups" element={<InventoryPage kind="groups" />} />

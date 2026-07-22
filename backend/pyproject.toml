@@ -14,6 +14,7 @@ dependencies = [
   "prometheus-client==0.22.1",
   "psycopg[binary,pool]==3.2.9",
   "pydantic-settings==2.10.1",
+  "reportlab==4.4.3",
   "sqlalchemy[asyncio]==2.0.41",
   "structlog==25.4.0",
   "uvicorn[standard]==0.35.0",
@@ -58,5 +59,5 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*"]
+module = ["apscheduler.*", "reportlab.*"]
 ignore_missing_imports = true

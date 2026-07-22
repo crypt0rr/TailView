@@ -18,6 +18,7 @@ TailView is a self-hosted, read-only observability dashboard for a Tailscale tai
 - Interactive Cytoscape topology with observed and policy-permitted layers, layouts, filtering, selection, and a details drawer.
 - Flow explorer, reported-volume charts, CSV/JSON export, unresolved destinations, and virtual/subnet/exit/physical categories.
 - Real PostgreSQL-backed traffic time series, shared 1-hour/24-hour/7-day/30-day ranges, keyset pagination, and filter-matched exports.
+- In-app network usage reports generated from saved Flow views, with 13 months of compact aggregate history and authenticated PDF, JSON, and CSV evidence downloads.
 - Read-only HuJSON policy snapshots, normalized Grants/ACL sections, selector expansion, and explicit incomplete/unsupported results.
 - Configuration audit events, synchronization history, independent capability states, Prometheus metrics, and structured logs.
 - Administrator DNS inventory covering MagicDNS preferences, nameservers, search domains, split-DNS routing, freshness, and API provenance.
@@ -77,6 +78,8 @@ cd frontend && npm ci && npm run dev
 Python 3.13 is required for local backend work. The Docker build supplies the correct runtime when the host does not.
 
 `EXPORT_ROW_LIMIT` controls the maximum number of matching records in CSV and JSON exports and defaults to 10,000. Export responses include limit and truncation headers.
+
+Network reporting retains hourly aggregates for 90 days and daily aggregates for 400 days by default. Completed report artifacts are retained for 180 days. Administrators create schedules under **Reports**; all authenticated TailView users can inspect and download completed reports. Volumes remain client-reported and potentially overlapping.
 
 Resolved findings and notification delivery history are retained for 180 days by default (`FINDINGS_RETENTION_DAYS`). Webhook destinations require public HTTPS in production. Private destinations must be explicitly constrained with `ALERT_WEBHOOK_HOST_ALLOWLIST`.
 

@@ -25,9 +25,9 @@ class UserResponse(BaseModel):
     must_change_password: bool = False
     mfa_enabled: bool = False
     mfa_required: bool = False
-    auth_status: Literal[
-        "authenticated", "password_change_required", "mfa_enrollment_required"
-    ] = "authenticated"
+    auth_status: Literal["authenticated", "password_change_required", "mfa_enrollment_required"] = (
+        "authenticated"
+    )
 
 
 class AuthResult(BaseModel):
@@ -101,6 +101,23 @@ class SavedViewCloneRequest(BaseModel):
 
 class SavedViewDefaultRequest(BaseModel):
     view_id: str | None = Field(default=None, max_length=36)
+
+
+class ReportGenerateRequest(BaseModel):
+    saved_view_id: str = Field(min_length=1, max_length=36)
+    range: Literal["24h", "7d", "30d", "90d", "13mo"] | None = None
+    title: str = Field(default="", max_length=255)
+
+
+class ReportScheduleRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    saved_view_id: str = Field(min_length=1, max_length=36)
+    frequency: Literal["daily", "weekly", "monthly"]
+    timezone: str = Field(default="UTC", min_length=1, max_length=64)
+    local_time: str = Field(default="08:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    weekday: int | None = Field(default=None, ge=0, le=6)
+    month_day: int | None = Field(default=None, ge=1, le=28)
+    enabled: bool = True
 
 
 class Page(BaseModel):

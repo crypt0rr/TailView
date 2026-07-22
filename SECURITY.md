@@ -8,6 +8,8 @@ Do not open a public issue for a suspected vulnerability. Send a private report 
 
 TailView treats the browser, upstream API responses, optional telemetry agent, reverse-proxy headers, and network-flow client fields as untrusted. PostgreSQL contains sensitive inventory, policy, audit, flow, session, and encrypted credential data. A database dump plus the deployment master key is sufficient to recover stored Tailscale credentials, so they must be stored and backed up separately.
 
+Generated network reports contain authenticated inventory labels, traffic relationships, unresolved addresses, and aggregate usage evidence. Report downloads are never public, remain subject to the normal TailView session, and should be handled with the same care as direct Flow exports.
+
 The integration is read-only. Administrators can configure credentials, metadata, schedules, and users; viewers cannot mutate application state. Tailscale secrets stay in the backend and are redacted from logs and raw diagnostic payloads.
 
 Access-governance synchronization stores only upstream credential metadata. Usable key and token values are never requested. Identifiers are masked in API responses and the UI; secret-bearing raw fields, authorization headers, URL credentials, and query values are removed before diagnostic persistence.

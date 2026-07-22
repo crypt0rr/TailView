@@ -64,6 +64,9 @@ from .models import (
     NotificationEndpoint,
     PolicySnapshot,
     PostureIntegration,
+    ReportArtifact,
+    ReportRun,
+    ReportSchedule,
     SavedView,
     SavedViewDefault,
     ServiceEndpoint,
@@ -86,6 +89,12 @@ from .policy import (
     security_review_policy,
     source_line,
 )
+from .reporting import (
+    RANGE_HOURS,
+    new_manual_run,
+    next_schedule_time,
+    validate_timezone,
+)
 from .saved_views import compatible_state, normalize_state, page_allowed
 from .schemas import (
     AppUserCreateRequest,
@@ -104,6 +113,8 @@ from .schemas import (
     MfaVerifyRequest,
     NotificationEndpointRequest,
     PasswordChangeRequest,
+    ReportGenerateRequest,
+    ReportScheduleRequest,
     SavedViewCloneRequest,
     SavedViewCreateRequest,
     SavedViewDefaultRequest,
@@ -439,9 +450,7 @@ async def login(
 
 
 @router.get("/auth/me", response_model=UserResponse)
-async def me(
-    session: Annotated[Session, Depends(auth.current_session)], db: Db
-) -> UserResponse:
+async def me(session: Annotated[Session, Depends(auth.current_session)], db: Db) -> UserResponse:
     result = await auth.response_for_user(db, session.user, session)
     await db.commit()
     return result
@@ -513,9 +522,7 @@ async def change_password(
     user.password_changed_at = datetime.now(UTC)
     await auth.revoke_user_sessions(db, user.id)
     auth.add_security_event(db, request, "password.change", actor_id=user.id, subject_id=user.id)
-    _replacement_session, result = await auth.create_session(
-        db, user, response, settings, request
-    )
+    _replacement_session, result = await auth.create_session(db, user, response, settings, request)
     return result
 
 
@@ -701,9 +708,9 @@ def _app_user_dict(user: AppUser, session_count: int = 0) -> dict[str, Any]:
 async def _active_admin_count(db: AsyncSession) -> int:
     return int(
         await db.scalar(
-            select(func.count()).select_from(AppUser).where(
-                AppUser.active.is_(True), AppUser.role == "administrator"
-            )
+            select(func.count())
+            .select_from(AppUser)
+            .where(AppUser.active.is_(True), AppUser.role == "administrator")
         )
         or 0
     )
@@ -806,8 +813,10 @@ async def update_app_user(
     user = await db.get(AppUser, user_id)
     if user is None:
         raise HTTPException(404, "TailView account not found")
-    removing_admin = user.active and user.role == "administrator" and (
-        payload.active is False or payload.role == "viewer"
+    removing_admin = (
+        user.active
+        and user.role == "administrator"
+        and (payload.active is False or payload.role == "viewer")
     )
     if removing_admin and await _active_admin_count(db) <= 1:
         raise HTTPException(409, "The final active Administrator cannot be changed")
@@ -1066,13 +1075,8 @@ async def auth_events(
 
 
 def _saved_view_visible(user: AppUser, view: SavedView) -> bool:
-    return (
-        page_allowed(view.page, user.role)
-        and (
-            user.role == "administrator"
-            or view.owner_id == user.id
-            or view.visibility == "shared"
-        )
+    return page_allowed(view.page, user.role) and (
+        user.role == "administrator" or view.owner_id == user.id or view.visibility == "shared"
     )
 
 
@@ -1158,9 +1162,7 @@ async def saved_views(
     if scope == "mine":
         statement = statement.where(SavedView.owner_id == user.id)
     elif scope == "shared":
-        statement = statement.where(
-            SavedView.visibility == "shared", SavedView.owner_id != user.id
-        )
+        statement = statement.where(SavedView.visibility == "shared", SavedView.owner_id != user.id)
     if visibility:
         statement = statement.where(SavedView.visibility == visibility)
     if search:
@@ -1178,9 +1180,7 @@ async def saved_views(
     rows = (
         await db.execute(statement.order_by(SavedView.page, func.lower(SavedView.name)).limit(500))
     ).all()
-    return {
-        "items": [_saved_view_dict(view, user, owner, defaults) for view, owner in rows]
-    }
+    return {"items": [_saved_view_dict(view, user, owner, defaults) for view, owner in rows]}
 
 
 @router.post("/saved-views")
@@ -1371,6 +1371,310 @@ async def clone_saved_view(
     return _saved_view_dict(view, user, user)
 
 
+async def _report_artifact_metadata(run_id: str, db: AsyncSession) -> list[dict[str, Any]]:
+    rows = (
+        await db.scalars(
+            select(ReportArtifact)
+            .where(ReportArtifact.run_id == run_id)
+            .order_by(ReportArtifact.format)
+        )
+    ).all()
+    return [
+        {
+            "format": row.format,
+            "content_type": row.content_type,
+            "filename": row.filename,
+            "content_hash": row.content_hash,
+            "size": row.size,
+        }
+        for row in rows
+    ]
+
+
+async def _report_dict(run: ReportRun, db: AsyncSession, detail: bool = False) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "id": run.id,
+        "title": run.title,
+        "status": run.status,
+        "schedule_id": run.schedule_id,
+        "saved_view_id": run.saved_view_id,
+        "saved_view_revision": run.saved_view_revision,
+        "range_start": run.range_start,
+        "range_end": run.range_end,
+        "filters": run.filters,
+        "coverage": run.coverage,
+        "error": run.error,
+        "created_at": run.created_at,
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
+        "artifacts": await _report_artifact_metadata(run.id, db),
+    }
+    if detail and run.status in {"completed", "partial"}:
+        value["snapshot"] = run.snapshot
+    return value
+
+
+def _schedule_dict(schedule: ReportSchedule) -> dict[str, Any]:
+    return {
+        "id": schedule.id,
+        "name": schedule.name,
+        "saved_view_id": schedule.saved_view_id,
+        "frequency": schedule.frequency,
+        "timezone": schedule.timezone,
+        "local_time": schedule.local_time,
+        "weekday": schedule.weekday,
+        "month_day": schedule.month_day,
+        "enabled": schedule.enabled,
+        "next_run_at": schedule.next_run_at,
+        "last_run_at": schedule.last_run_at,
+        "last_error": schedule.last_error,
+        "created_at": schedule.created_at,
+        "updated_at": schedule.updated_at,
+    }
+
+
+def _validate_schedule_payload(payload: ReportScheduleRequest) -> None:
+    if not payload.name.strip():
+        raise HTTPException(422, "Report schedule name is required")
+    try:
+        validate_timezone(payload.timezone)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if payload.frequency == "weekly" and payload.weekday is None:
+        raise HTTPException(422, "weekday is required for weekly reports")
+    if payload.frequency == "monthly" and payload.month_day is None:
+        raise HTTPException(422, "month_day is required for monthly reports")
+
+
+@router.get("/reports/summary")
+async def reports_summary(_: Authed, db: Db) -> dict[str, Any]:
+    counts = {
+        status_value: int(count)
+        for status_value, count in (
+            await db.execute(select(ReportRun.status, func.count()).group_by(ReportRun.status))
+        ).all()
+    }
+    latest = await db.scalar(
+        select(ReportRun)
+        .where(ReportRun.status.in_(["completed", "partial"]))
+        .order_by(ReportRun.completed_at.desc())
+        .limit(1)
+    )
+    return {
+        "counts": counts,
+        "latest": await _report_dict(latest, db) if latest else None,
+    }
+
+
+@router.get("/reports")
+async def reports(
+    _: Authed,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    status_filter: str = Query("", alias="status", max_length=32),
+    schedule_id: str = Query("", max_length=36),
+    saved_view_id: str = Query("", max_length=36),
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> dict[str, Any]:
+    statement = select(ReportRun)
+    if status_filter:
+        if status_filter not in {"queued", "running", "completed", "partial", "failed"}:
+            raise HTTPException(422, "Unsupported report status")
+        statement = statement.where(ReportRun.status == status_filter)
+    if schedule_id:
+        statement = statement.where(ReportRun.schedule_id == schedule_id)
+    if saved_view_id:
+        statement = statement.where(ReportRun.saved_view_id == saved_view_id)
+    if date_from:
+        statement = statement.where(ReportRun.created_at >= date_from)
+    if date_to:
+        statement = statement.where(ReportRun.created_at <= date_to)
+    cursor_data = decode_cursor(cursor, "reports")
+    if cursor_data:
+        created = datetime.fromisoformat(str(cursor_data["created_at"]))
+        statement = statement.where(
+            or_(
+                ReportRun.created_at < created,
+                (ReportRun.created_at == created) & (ReportRun.id < str(cursor_data["id"])),
+            )
+        )
+    rows = (
+        await db.scalars(
+            statement.order_by(ReportRun.created_at.desc(), ReportRun.id.desc()).limit(limit + 1)
+        )
+    ).all()
+    page = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit and page:
+        last = page[-1]
+        next_cursor = encode_cursor(
+            "reports", {"created_at": last.created_at.isoformat(), "id": last.id}
+        )
+    return {
+        "items": [await _report_dict(row, db) for row in page],
+        "next_cursor": next_cursor,
+    }
+
+
+@router.post("/reports/generate", status_code=202)
+async def generate_network_report(
+    payload: ReportGenerateRequest, user: Admin, _: Csrf, db: Db
+) -> dict[str, Any]:
+    view = await _saved_view_for_user(payload.saved_view_id, user, db)
+    if view.page != "flows" or not compatible_state(view.page, view.schema_version, view.state):
+        raise HTTPException(422, "An accessible compatible saved Flow view is required")
+    range_name = payload.range or str(view.state.get("range", "24h"))
+    if range_name not in RANGE_HOURS:
+        raise HTTPException(422, "Unsupported report range")
+    run = new_manual_run(view, user.id, range_name, payload.title, datetime.now(UTC))
+    db.add(run)
+    await db.commit()
+    return await _report_dict(run, db)
+
+
+@router.get("/reports/{report_id}")
+async def report_detail(report_id: str, _: Authed, db: Db) -> dict[str, Any]:
+    run = await db.get(ReportRun, report_id)
+    if run is None:
+        raise HTTPException(404, "Report not found")
+    return await _report_dict(run, db, detail=True)
+
+
+@router.get("/reports/{report_id}/download")
+async def download_report(
+    report_id: str,
+    _: Authed,
+    db: Db,
+    format: Literal["pdf", "json", "csv"] = "pdf",
+) -> Response:
+    run = await db.get(ReportRun, report_id)
+    if run is None or run.status not in {"completed", "partial"}:
+        raise HTTPException(404, "Completed report not found")
+    artifact = await db.get(ReportArtifact, (report_id, format))
+    if artifact is None:
+        raise HTTPException(404, "Report artifact not found")
+    return Response(
+        artifact.content,
+        media_type=artifact.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{artifact.filename}"',
+            "X-TailView-Content-SHA256": artifact.content_hash,
+            "X-TailView-Report-ID": run.id,
+            "X-TailView-Generated-At": run.completed_at.isoformat() if run.completed_at else "",
+        },
+    )
+
+
+@router.post("/reports/{report_id}/retry", status_code=202)
+async def retry_report(report_id: str, _: Admin, __: Csrf, db: Db) -> dict[str, Any]:
+    run = await db.get(ReportRun, report_id)
+    if run is None:
+        raise HTTPException(404, "Report not found")
+    if run.status != "failed":
+        raise HTTPException(409, "Only failed reports can be retried")
+    await db.execute(delete(ReportArtifact).where(ReportArtifact.run_id == report_id))
+    run.status = "queued"
+    run.error = ""
+    run.started_at = None
+    run.completed_at = None
+    await db.commit()
+    return await _report_dict(run, db)
+
+
+@router.get("/report-schedules")
+async def report_schedules(_: Admin, db: Db) -> dict[str, Any]:
+    rows = (
+        await db.scalars(select(ReportSchedule).order_by(func.lower(ReportSchedule.name)))
+    ).all()
+    return {"items": [_schedule_dict(row) for row in rows]}
+
+
+@router.post("/report-schedules")
+async def create_report_schedule(
+    payload: ReportScheduleRequest, user: Admin, _: Csrf, db: Db
+) -> dict[str, Any]:
+    _validate_schedule_payload(payload)
+    view = await _saved_view_for_user(payload.saved_view_id, user, db)
+    if view.page != "flows" or not compatible_state(view.page, view.schema_version, view.state):
+        raise HTTPException(422, "An accessible compatible saved Flow view is required")
+    schedule = ReportSchedule(
+        name=payload.name.strip(),
+        saved_view_id=view.id,
+        frequency=payload.frequency,
+        timezone=payload.timezone,
+        local_time=payload.local_time,
+        weekday=payload.weekday if payload.frequency == "weekly" else None,
+        month_day=payload.month_day if payload.frequency == "monthly" else None,
+        enabled=payload.enabled,
+        created_by=user.id,
+    )
+    schedule.next_run_at = (
+        next_schedule_time(schedule, datetime.now(UTC)) if schedule.enabled else None
+    )
+    db.add(schedule)
+    await db.commit()
+    return _schedule_dict(schedule)
+
+
+@router.put("/report-schedules/{schedule_id}")
+async def update_report_schedule(
+    schedule_id: str,
+    payload: ReportScheduleRequest,
+    user: Admin,
+    _: Csrf,
+    db: Db,
+) -> dict[str, Any]:
+    _validate_schedule_payload(payload)
+    schedule = await db.get(ReportSchedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(404, "Report schedule not found")
+    view = await _saved_view_for_user(payload.saved_view_id, user, db)
+    if view.page != "flows" or not compatible_state(view.page, view.schema_version, view.state):
+        raise HTTPException(422, "An accessible compatible saved Flow view is required")
+    schedule.name = payload.name.strip()
+    schedule.saved_view_id = view.id
+    schedule.frequency = payload.frequency
+    schedule.timezone = payload.timezone
+    schedule.local_time = payload.local_time
+    schedule.weekday = payload.weekday if payload.frequency == "weekly" else None
+    schedule.month_day = payload.month_day if payload.frequency == "monthly" else None
+    schedule.enabled = payload.enabled
+    schedule.last_error = ""
+    schedule.next_run_at = (
+        next_schedule_time(schedule, datetime.now(UTC)) if schedule.enabled else None
+    )
+    schedule.updated_at = datetime.now(UTC)
+    await db.commit()
+    return _schedule_dict(schedule)
+
+
+@router.delete("/report-schedules/{schedule_id}")
+async def delete_report_schedule(schedule_id: str, _: Admin, __: Csrf, db: Db) -> None:
+    schedule = await db.get(ReportSchedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(404, "Report schedule not found")
+    await db.delete(schedule)
+    await db.commit()
+
+
+@router.post("/report-schedules/{schedule_id}/run", status_code=202)
+async def run_report_schedule(schedule_id: str, user: Admin, _: Csrf, db: Db) -> dict[str, Any]:
+    schedule = await db.get(ReportSchedule, schedule_id)
+    if schedule is None or not schedule.saved_view_id:
+        raise HTTPException(404, "Report schedule not found")
+    view = await _saved_view_for_user(schedule.saved_view_id, user, db)
+    if view.page != "flows" or not compatible_state(view.page, view.schema_version, view.state):
+        raise HTTPException(422, "Saved Flow view is missing or incompatible")
+    range_name = {"daily": "24h", "weekly": "7d", "monthly": "30d"}[schedule.frequency]
+    run = new_manual_run(view, user.id, range_name, schedule.name, datetime.now(UTC))
+    run.schedule_id = schedule.id
+    db.add(run)
+    await db.commit()
+    return await _report_dict(run, db)
+
+
 @router.get("/dashboard")
 async def dashboard(
     user: Authed,
@@ -1420,6 +1724,12 @@ async def dashboard(
         severity: int(count)
         for severity, count in (await db.execute(finding_query.group_by(Finding.severity))).all()
     }
+    latest_report = await db.scalar(
+        select(ReportRun)
+        .where(ReportRun.status.in_(["completed", "partial"]))
+        .order_by(ReportRun.completed_at.desc())
+        .limit(1)
+    )
     return {
         "devices": device_count,
         "online": online,
@@ -1448,6 +1758,20 @@ async def dashboard(
             "critical": finding_counts.get("critical", 0),
             "high": finding_counts.get("high", 0),
         },
+        "latest_report": {
+            "id": latest_report.id,
+            "title": latest_report.title,
+            "status": latest_report.status,
+            "range_start": latest_report.range_start,
+            "range_end": latest_report.range_end,
+            "reported_bytes": latest_report.snapshot.get("traffic", {})
+            .get("totals", {})
+            .get("reported_bytes", 0),
+            "coverage_complete": latest_report.coverage.get("complete", False),
+            "completed_at": latest_report.completed_at,
+        }
+        if latest_report
+        else None,
     }
 
 

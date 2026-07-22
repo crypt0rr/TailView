@@ -429,3 +429,47 @@ export interface DnsConfiguration {
   search_paths?: string[];
   split_dns?: Record<string, unknown>;
 }
+
+export interface ReportArtifactMetadata {
+  format: "pdf" | "json" | "csv";
+  content_type: string;
+  filename: string;
+  content_hash: string;
+  size: number;
+}
+
+export interface NetworkReport {
+  id: string;
+  title: string;
+  status: "queued" | "running" | "completed" | "partial" | "failed";
+  schedule_id: string | null;
+  saved_view_id: string | null;
+  saved_view_revision: number | null;
+  range_start: string;
+  range_end: string;
+  filters: Record<string, unknown>;
+  coverage: { complete?: boolean; coverage_start?: string | null; coverage_end?: string | null; granularity?: string };
+  error: string;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  artifacts: ReportArtifactMetadata[];
+  snapshot?: Record<string, any>;
+}
+
+export interface ReportScheduleRecord {
+  id: string;
+  name: string;
+  saved_view_id: string | null;
+  frequency: "daily" | "weekly" | "monthly";
+  timezone: string;
+  local_time: string;
+  weekday: number | null;
+  month_day: number | null;
+  enabled: boolean;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+}

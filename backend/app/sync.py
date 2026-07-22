@@ -43,6 +43,7 @@ from .models import (
     WebhookEndpoint,
 )
 from .policy import parse_policy
+from .reporting import aggregate_flows_job, cleanup_reporting_job, reporting_cycle
 from .security import SecretBox
 from .tailscale import TailscaleClient, TailscaleError, capability_status
 
@@ -1519,6 +1520,33 @@ def create_scheduler() -> AsyncIOScheduler:
         "interval",
         hours=24,
         id="findings-cleanup",
+        max_instances=1,
+        coalesce=True,
+        jitter=300,
+    )
+    scheduler.add_job(
+        aggregate_flows_job,
+        "interval",
+        minutes=5,
+        id="flow-aggregates",
+        max_instances=1,
+        coalesce=True,
+        jitter=20,
+    )
+    scheduler.add_job(
+        reporting_cycle,
+        "interval",
+        seconds=30,
+        id="network-reports",
+        max_instances=1,
+        coalesce=True,
+        jitter=5,
+    )
+    scheduler.add_job(
+        cleanup_reporting_job,
+        "interval",
+        hours=24,
+        id="reporting-cleanup",
         max_instances=1,
         coalesce=True,
         jitter=300,
