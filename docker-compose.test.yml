@@ -1,0 +1,31 @@
+services:
+  database:
+    container_name: !reset null
+  backend:
+    container_name: !reset null
+    environment:
+      ENVIRONMENT: test
+      APP_URL: http://frontend:8080
+      DEMO_MODE: "true"
+      COOKIE_SECURE: "false"
+  frontend:
+    container_name: !reset null
+    ports: !reset []
+  caddy:
+    container_name: !reset null
+  telemetry-agent:
+    container_name: !reset null
+  e2e:
+    container_name: !reset null
+    build: {context: ./frontend, target: e2e}
+    command: npm run test:e2e
+    environment:
+      PLAYWRIGHT_BASE_URL: http://frontend:8080
+      E2E_SETUP_TOKEN: ${TAILVIEW_SETUP_TOKEN}
+      E2E_USERNAME: e2e-admin
+      E2E_PASSWORD: e2e-temporary-password-2026
+    volumes:
+      - ./frontend/e2e:/app/e2e
+    depends_on:
+      frontend: {condition: service_healthy}
+    networks: [app]

@@ -1,0 +1,15 @@
+vulnerabilities:
+  - id: CVE-2026-46602
+    paths:
+      - "usr/local/bin/tailscale"
+    statement: >-
+      Accepted temporarily for the official Tailscale 1.98.9 CLI. TailView invokes only
+      status --json and netcheck; it never accepts or decodes TIFF image input.
+    expired_at: 2026-08-22
+  - id: CVE-2026-46604
+    paths:
+      - "usr/local/bin/tailscale"
+    statement: >-
+      Accepted temporarily for the official Tailscale 1.98.9 CLI. TailView invokes only
+      status --json and netcheck; it never accepts or decodes TIFF image input.
+    expired_at: 2026-08-22

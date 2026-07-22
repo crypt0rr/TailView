@@ -1,0 +1,179 @@
+name: Promote accepted release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_tag:
+        description: Accepted candidate tag (for example v1.0.0-rc.1)
+        required: true
+        type: string
+      stable_tag:
+        description: Signed stable tag on the identical commit (for example v1.0.0)
+        required: true
+        type: string
+
+concurrency:
+  group: stable-promotion-${{ inputs.stable_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+  attestations: read
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    environment: stable-release
+    steps:
+      - name: Check out complete signed-tag history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.stable_tag }}
+
+      - name: Validate tag identity and protected-branch ancestry
+        env:
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch --force origin "refs/tags/${CANDIDATE_TAG}:refs/tags/${CANDIDATE_TAG}" \
+            "refs/tags/${STABLE_TAG}:refs/tags/${STABLE_TAG}" "$DEFAULT_BRANCH"
+          candidate_commit="$(git rev-list -n 1 "$CANDIDATE_TAG")"
+          stable_commit="$(git rev-list -n 1 "$STABLE_TAG")"
+          python3 deploy/release_validate.py validate-pair --candidate "$CANDIDATE_TAG" \
+            --stable "$STABLE_TAG" --candidate-commit "$candidate_commit" --stable-commit "$stable_commit"
+          git merge-base --is-ancestor "$stable_commit" "origin/$DEFAULT_BRANCH"
+          echo "CANDIDATE_COMMIT=$candidate_commit" >> "$GITHUB_ENV"
+          echo "CORE_VERSION=$(python3 deploy/release_validate.py core-version "$STABLE_TAG")" >> "$GITHUB_ENV"
+          python3 deploy/release_validate.py validate-exceptions --file .trivyignore.yaml
+
+      - name: Import and verify the release-owner public key
+        env:
+          RELEASE_GPG_PUBLIC_KEY: ${{ vars.RELEASE_GPG_PUBLIC_KEY }}
+          RELEASE_GPG_FINGERPRINT: ${{ vars.RELEASE_GPG_FINGERPRINT }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+        run: |
+          test -n "$RELEASE_GPG_PUBLIC_KEY"
+          test -n "$RELEASE_GPG_FINGERPRINT"
+          printf '%s\n' "$RELEASE_GPG_PUBLIC_KEY" | gpg --batch --import
+          expected="$(printf '%s' "$RELEASE_GPG_FINGERPRINT" | tr -d ' ' | tr '[:lower:]' '[:upper:]')"
+          actual="$(git verify-tag --raw "$STABLE_TAG" 2>&1 | awk '/VALIDSIG/ {print $3; exit}')"
+          test "$actual" = "$expected"
+
+      - name: Download immutable RC artifacts and soak evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: |
+          mkdir release-assets
+          gh release download "$CANDIDATE_TAG" --dir release-assets
+
+      - name: Verify signed soak evidence and release identities
+        env:
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+          RELEASE_GPG_FINGERPRINT: ${{ vars.RELEASE_GPG_FINGERPRINT }}
+        run: |
+          candidate_version="${CANDIDATE_TAG#v}"
+          manifest="release-assets/tailview-${candidate_version}-SHA256SUMS"
+          signature="${manifest}.asc"
+          evidence="release-assets/tailview-${candidate_version}-soak.json"
+          test -f "$manifest" && test -f "$signature" && test -f "$evidence"
+          expected="$(printf '%s' "$RELEASE_GPG_FINGERPRINT" | tr -d ' ' | tr '[:lower:]' '[:upper:]')"
+          actual="$(gpg --batch --status-fd=1 --verify "$signature" "$manifest" 2>/dev/null | awk '/VALIDSIG/ {print $3; exit}')"
+          test "$actual" = "$expected"
+          python3 deploy/release_validate.py validate-evidence --evidence "$evidence" \
+            --checksums "$manifest" --candidate "$CANDIDATE_TAG" --commit "$CANDIDATE_COMMIT"
+          evidence_hash="$(sha256sum "$manifest" | awk '{print $1}')"
+          tag_message="$(git for-each-ref --format='%(contents)' "refs/tags/${STABLE_TAG}")"
+          grep -Fxq "Candidate: ${CANDIDATE_TAG}" <<EOF
+          $tag_message
+          EOF
+          grep -Fxq "Evidence-SHA256: ${evidence_hash}" <<EOF
+          $tag_message
+          EOF
+          (cd release-assets && sha256sum -c "tailview-${candidate_version}-compose.tar.gz.sha256")
+
+      - name: Validate recorded release image digests
+        env:
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+        run: |
+          candidate_version="${CANDIDATE_TAG#v}"
+          digest_manifest="release-assets/tailview-${candidate_version}-image-digests.json"
+          python3 deploy/release_validate.py validate-digests --manifest "$digest_manifest" \
+            --candidate "$CANDIDATE_TAG" --commit "$CANDIDATE_COMMIT" > /tmp/digests.json
+          python3 - "$digest_manifest" "release-assets/tailview-${candidate_version}-soak.json" <<'PY'
+          import json, sys
+          recorded = json.load(open(sys.argv[1], encoding="utf-8"))["images"]
+          soaked = json.load(open(sys.argv[2], encoding="utf-8"))["image_digests"]
+          if recorded != soaked:
+              raise SystemExit("soak image digests differ from the accepted RC digest manifest")
+          PY
+
+      - name: Set up manifest inspection
+        uses: docker/setup-buildx-action@v4
+
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify attestations, architectures, and unchanged RC manifests
+        env:
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for name in tailview-backend tailview-frontend tailview-telemetry-agent; do
+            image="ghcr.io/${OWNER,,}/${name}"
+            digest="$(jq -r --arg name "$name" '.[$name]' /tmp/digests.json)"
+            docker buildx imagetools inspect "${image}@${digest}" > "/tmp/${name}.manifest"
+            grep -q 'linux/amd64' "/tmp/${name}.manifest"
+            grep -q 'linux/arm64' "/tmp/${name}.manifest"
+            rc_digest="$(docker buildx imagetools inspect "${image}:${CANDIDATE_TAG#v}" | awk '/^Digest:/ {print $2; exit}')"
+            test "$rc_digest" = "$digest"
+            gh attestation verify "oci://${image}@${digest}" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$CANDIDATE_COMMIT"
+          done
+
+      - name: Promote exact accepted manifests without rebuilding
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          major="${CORE_VERSION%%.*}"
+          remainder="${CORE_VERSION#*.}"
+          minor="${remainder%%.*}"
+          for name in tailview-backend tailview-frontend tailview-telemetry-agent; do
+            image="ghcr.io/${OWNER,,}/${name}"
+            digest="$(jq -r --arg name "$name" '.[$name]' /tmp/digests.json)"
+            docker buildx imagetools create \
+              --tag "${image}:${CORE_VERSION}" --tag "${image}:${major}.${minor}" \
+              --tag "${image}:${major}" --tag "${image}:latest" "${image}@${digest}"
+            for tag in "$CORE_VERSION" "${major}.${minor}" "$major" latest; do
+              promoted="$(docker buildx imagetools inspect "${image}:${tag}" | awk '/^Digest:/ {print $2; exit}')"
+              test "$promoted" = "$digest"
+            done
+          done
+
+      - name: Publish the stable GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_TAG: ${{ inputs.candidate_tag }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+        run: |
+          cat > /tmp/stable-notes.md <<EOF
+          TailView ${STABLE_TAG} promotes the exact multi-platform manifests tested as ${CANDIDATE_TAG}.
+
+          No application image was rebuilt. The attached candidate digest manifest and signed 24-hour soak evidence identify the promoted artifacts.
+          EOF
+          gh release create "$STABLE_TAG" release-assets/* --verify-tag --latest \
+            --title "TailView ${STABLE_TAG}" --notes-file /tmp/stable-notes.md

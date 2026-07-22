@@ -1,0 +1,30 @@
+# Policy engine
+
+TailView parses the current HuJSON policy read-only and evaluates additive allow relationships. It does not modify policy and does not create explicit deny edges. “No matching allow rule” is not evidence that a connection attempt occurred or was blocked.
+
+## Processing
+
+1. Store the exact policy and content hash.
+2. Parse HuJSON comments/trailing commas into a normalized representation while retaining the original source.
+3. Normalize Grants, legacy ACLs, groups, tags, hosts, IP sets, SSH, postures, auto-approvers, tests, node attributes, and known autogroups.
+4. Expand selectors against the synchronized device/user snapshot.
+5. Produce source, destination, protocol/port, matching rule, expansion path, posture references, and an evaluation status.
+6. Compare current permissions with observations in the selected historical range.
+
+Statuses are `fully_evaluated`, `partially_evaluated`, `unsupported_construct`, and `unresolved_selector`. Unknown autogroups, missing posture attributes, app-specific capability semantics, ambiguous routes, and future syntax are never guessed. Application capabilities are displayed as source policy unless their official semantics are explicitly supported.
+
+Device posture evaluation implements `==`, `!=`, `IN`, `NOT IN`, `IS SET`, `NOT SET`, numeric comparisons, and supported version comparisons. Assertions are ANDed within a posture and multiple `srcPosture` entries are ORed. `defaultSrcPosture` applies only when a rule omits an explicit source posture. Missing attributes fail only after a successful fresh attribute response; stale or failed evidence remains incomplete. Shared-node and subnet-routed applicability is not guessed.
+
+Historical observations without a current allow are labelled: “Observed historically; no matching allow rule exists in the current policy. The policy may have changed after this flow occurred.” This is never automatically described as a policy bypass.
+
+## Duplicate review
+
+The Policy Explorer can produce a conservative duplicate review. It recursively removes only canonically identical array entries inside documented policy sections. Unsupported top-level sections are copied without interpretation, and TailView never submits or applies the generated candidate.
+
+The candidate is regenerated as strict JSON, which is valid HuJSON, but original comments and formatting are not retained. It must therefore be treated as a review artifact and validated with Tailscale before any manual replacement. TailView does not combine overlapping selectors, reorder rules, infer semantic equivalence, or perform other speculative optimizations.
+
+## Security review
+
+The Policy Explorer also provides a read-only heuristic security review. It highlights unrestricted all-to-all rules, broad identity or destination selectors, large current-inventory host-to-host expansions, broad access to infrastructure-like destinations without source posture, permissive Tailscale SSH `accept` rules, broad tag ownership, and broad route auto-approval authority.
+
+Each finding includes its policy path, evidence, confidence, affected-pair summary where resolvable, and conservative remediation guidance. Findings are review prompts—not proof of exploitation, policy invalidity, or unnecessary access. TailView cannot infer business intent, and it deliberately does not evaluate application-specific capabilities as ordinary network access. No proposed security change is generated or applied automatically.

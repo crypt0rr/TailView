@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from urllib.parse import quote
+
+import httpx
+
+
+class TailscaleError(RuntimeError):
+    def __init__(self, status: int, message: str, retry_after: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
+
+
+class TailscaleClient:
+    base_url = "https://api.tailscale.com/api/v2"
+
+    def __init__(
+        self,
+        tailnet: str,
+        api_token: str = "",
+        client_id: str = "",
+        client_secret: str = "",
+    ) -> None:
+        self.tailnet = tailnet
+        self.api_token = api_token
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self._oauth_token: str | None = None
+        self._oauth_expires = datetime.min.replace(tzinfo=UTC)
+        self.http = httpx.AsyncClient(timeout=httpx.Timeout(30), follow_redirects=False)
+
+    async def close(self) -> None:
+        await self.http.aclose()
+
+    async def _token(self) -> str:
+        if self.api_token:
+            return self.api_token
+        if self._oauth_token and self._oauth_expires > datetime.now(UTC):
+            return self._oauth_token
+        response = await self.http.post(
+            f"{self.base_url}/oauth/token",
+            data={"grant_type": "client_credentials"},
+            auth=(self.client_id, self.client_secret),
+        )
+        self._raise(response)
+        body = response.json()
+        self._oauth_token = str(body["access_token"])
+        lifetime = max(30, int(body.get("expires_in", 3600)) - 60)
+        self._oauth_expires = datetime.now(UTC) + timedelta(seconds=lifetime)
+        return self._oauth_token
+
+    def _raise(self, response: httpx.Response) -> None:
+        if response.is_success:
+            return
+        retry = response.headers.get("retry-after")
+        retry_after = int(retry) if retry and retry.isdigit() else None
+        try:
+            detail = response.json().get("message", "Upstream request failed")
+        except Exception:
+            detail = "Upstream request failed"
+        raise TailscaleError(response.status_code, str(detail), retry_after)
+
+    async def get(
+        self,
+        path: str,
+        params: dict[str, str] | None = None,
+        *,
+        read_timeout: float = 30,
+    ) -> Any:
+        token = await self._token()
+        for attempt in range(4):
+            try:
+                response = await self.http.get(
+                    f"{self.base_url}{path}",
+                    params=params,
+                    headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                    timeout=httpx.Timeout(30, read=read_timeout),
+                )
+            except httpx.TransportError as exc:
+                if attempt == 3:
+                    raise TailscaleError(0, "Upstream network request failed") from exc
+                await asyncio.sleep(2**attempt)
+                continue
+            if response.status_code not in {429, 502, 503, 504}:
+                self._raise(response)
+                return response.json()
+            delay = int(response.headers.get("retry-after", "0") or 0) or 2**attempt
+            await asyncio.sleep(min(delay, 30))
+        self._raise(response)
+        raise AssertionError("unreachable")
+
+    async def get_text(self, path: str, accept: str = "application/hujson") -> str:
+        token = await self._token()
+        response = await self.http.get(
+            f"{self.base_url}{path}",
+            headers={"Authorization": f"Bearer {token}", "Accept": accept},
+        )
+        self._raise(response)
+        return response.text
+
+    async def devices(self) -> list[dict[str, Any]]:
+        body = await self.get(f"/tailnet/{self.tailnet}/devices", {"fields": "all"})
+        return list(body.get("devices", []))
+
+    async def device(self, device_id: str) -> dict[str, Any]:
+        encoded = quote(device_id, safe="")
+        return dict(await self.get(f"/device/{encoded}"))
+
+    async def users(self) -> list[dict[str, Any]]:
+        body = await self.get(f"/tailnet/{self.tailnet}/users")
+        return list(body.get("users", []))
+
+    async def routes(self, device_id: str) -> dict[str, Any]:
+        return dict(await self.get(f"/device/{device_id}/routes"))
+
+    async def posture_attributes(self, device_id: str) -> dict[str, Any]:
+        encoded = quote(device_id, safe="")
+        return dict(await self.get(f"/device/{encoded}/attributes"))
+
+    async def tailnet_settings(self) -> dict[str, Any]:
+        return dict(await self.get(f"/tailnet/{self.tailnet}/settings"))
+
+    async def posture_integrations(self) -> list[dict[str, Any]]:
+        body = await self.get(f"/tailnet/{self.tailnet}/posture/integrations")
+        if isinstance(body, list):
+            return [item for item in body if isinstance(item, dict)]
+        return list(body.get("integrations", []))
+
+    async def posture_integration(self, integration_id: str) -> dict[str, Any]:
+        encoded = quote(integration_id, safe="")
+        return dict(await self.get(f"/posture/integrations/{encoded}"))
+
+    async def policy(self) -> str:
+        return await self.get_text(f"/tailnet/{self.tailnet}/acl")
+
+    async def flows(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        body = await self.get(
+            f"/tailnet/{self.tailnet}/logging/network",
+            {"start": start.isoformat(), "end": end.isoformat()},
+            read_timeout=90,
+        )
+        return list(body.get("logs", []))
+
+    async def audit(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        body = await self.get(
+            f"/tailnet/{self.tailnet}/logging/configuration",
+            {"start": start.isoformat(), "end": end.isoformat()},
+        )
+        return list(body.get("logs", []))
+
+    async def services(self) -> list[dict[str, Any]]:
+        body = await self.get(f"/tailnet/{self.tailnet}/services")
+        return list(body.get("services", []))
+
+    async def service(self, service_id: str) -> dict[str, Any]:
+        encoded = quote(service_id, safe="")
+        return dict(await self.get(f"/tailnet/{self.tailnet}/services/{encoded}"))
+
+    async def service_hosts(self, service_id: str) -> list[dict[str, Any]]:
+        encoded = quote(service_id, safe="")
+        body = await self.get(f"/tailnet/{self.tailnet}/services/{encoded}/devices")
+        return list(body.get("devices", body.get("hosts", [])))
+
+    async def service_host_approval(self, service_id: str, device_id: str) -> dict[str, Any]:
+        service = quote(service_id, safe="")
+        device = quote(device_id, safe="")
+        return dict(await self.get(f"/tailnet/{self.tailnet}/services/{service}/devices/{device}"))
+
+    async def dns(self) -> dict[str, Any]:
+        prefix = f"/tailnet/{self.tailnet}/dns"
+        preferences, nameservers, search_paths, split_dns = await asyncio.gather(
+            self.get(f"{prefix}/preferences"),
+            self.get(f"{prefix}/nameservers"),
+            self.get(f"{prefix}/searchpaths"),
+            self.get(f"{prefix}/split-dns"),
+        )
+        return {
+            "preferences": preferences,
+            "nameservers": nameservers,
+            "searchPaths": search_paths,
+            "splitDNS": split_dns,
+        }
+
+    async def webhooks(self) -> list[dict[str, Any]]:
+        body = await self.get(f"/tailnet/{self.tailnet}/webhooks")
+        if not isinstance(body, dict):
+            raise TailscaleError(502, "Unexpected webhook inventory response")
+        items = body.get("webhooks")
+        if items is None:
+            items = body.get("endpoints")
+        if items is None:
+            return []
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise TailscaleError(502, "Unexpected webhook inventory response")
+        return [dict(item) for item in items]
+
+    async def keys(self) -> list[dict[str, Any]]:
+        body = await self.get(f"/tailnet/{self.tailnet}/keys")
+        if isinstance(body, list):
+            return [dict(item) for item in body if isinstance(item, dict)]
+        if not isinstance(body, dict):
+            raise TailscaleError(502, "Unexpected credential inventory response")
+        items = body.get("keys")
+        if isinstance(items, list):
+            return [dict(item) for item in items if isinstance(item, dict)]
+        combined: list[dict[str, Any]] = []
+        for field in ("authKeys", "accessTokens", "oauthKeys", "federatedKeys", "credentials"):
+            values = body.get(field)
+            if isinstance(values, list):
+                combined.extend(dict(item) for item in values if isinstance(item, dict))
+        return combined
+
+    async def device_invites(self, device_id: str) -> list[dict[str, Any]]:
+        encoded = quote(device_id, safe="")
+        body = await self.get(f"/device/{encoded}/device-invites")
+        if isinstance(body, list):
+            return [dict(item) for item in body if isinstance(item, dict)]
+        if not isinstance(body, dict):
+            raise TailscaleError(502, "Unexpected device invite response")
+        items = body.get("deviceInvites", body.get("invites", []))
+        if not isinstance(items, list):
+            raise TailscaleError(502, "Unexpected device invite response")
+        return [dict(item) for item in items if isinstance(item, dict)]
+
+    async def contacts(self) -> dict[str, Any]:
+        body = await self.get(f"/tailnet/{self.tailnet}/contacts")
+        if not isinstance(body, dict):
+            raise TailscaleError(502, "Unexpected tailnet contacts response")
+        return dict(body)
+
+    async def log_streaming(self, log_type: str) -> dict[str, Any]:
+        encoded = quote(log_type, safe="")
+        configuration, status = await asyncio.gather(
+            self.get(f"/tailnet/{self.tailnet}/logging/{encoded}/stream"),
+            self.get(f"/tailnet/{self.tailnet}/logging/{encoded}/status"),
+        )
+        return {
+            "configuration": configuration if isinstance(configuration, dict) else {},
+            "status": status if isinstance(status, dict) else {},
+        }
+
+
+def capability_status(error: TailscaleError) -> str:
+    if error.status in {401, 403}:
+        return "permission_denied"
+    if error.status == 404:
+        return "unsupported"
+    if error.status in {402, 409}:
+        return "feature_disabled"
+    return "upstream_error"

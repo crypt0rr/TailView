@@ -1,0 +1,183 @@
+import httpx
+import pytest
+import respx
+
+from app.tailscale import TailscaleClient, TailscaleError, capability_status
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_device_client_uses_bearer_and_documented_path() -> None:
+    route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/devices").mock(
+        return_value=httpx.Response(200, json={"devices": [{"id": "n1"}]})
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+    assert await client.devices() == [{"id": "n1"}]
+    assert route.calls[0].request.headers["authorization"] == "Bearer test-token"
+    assert route.calls[0].request.url.params["fields"] == "all"
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_device_detail_uses_encoded_stable_id() -> None:
+    route = respx.get("https://api.tailscale.com/api/v2/device/node%2Fone").mock(
+        return_value=httpx.Response(
+            200,
+            json={"nodeId": "node/one", "keyExpiryDisabled": True},
+        )
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+    result = await client.device("node/one")
+    assert route.called
+    assert result["keyExpiryDisabled"] is True
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_permission_error_is_safe_and_classified() -> None:
+    respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/users").mock(
+        return_value=httpx.Response(403, json={"message": "denied"})
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+    with pytest.raises(TailscaleError) as caught:
+        await client.users()
+    assert caught.value.status == 403
+    assert capability_status(caught.value) == "permission_denied"
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_client_retries_read_timeout_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.tailscale.asyncio.sleep", no_sleep)
+    route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/devices").mock(
+        side_effect=[
+            httpx.ReadTimeout("slow upstream response"),
+            httpx.Response(200, json={"devices": [{"nodeId": "n1"}]}),
+        ]
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert await client.devices() == [{"nodeId": "n1"}]
+    assert route.call_count == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_services_client_encodes_names_and_uses_read_paths() -> None:
+    detail = respx.get(
+        "https://api.tailscale.com/api/v2/tailnet/example.com/services/svc%3Aweb"
+    ).mock(return_value=httpx.Response(200, json={"name": "svc:web"}))
+    hosts = respx.get(
+        "https://api.tailscale.com/api/v2/tailnet/example.com/services/svc%3Aweb/devices"
+    ).mock(return_value=httpx.Response(200, json={"devices": [{"nodeId": "n1"}]}))
+    approval = respx.get(
+        "https://api.tailscale.com/api/v2/tailnet/example.com/services/svc%3Aweb/devices/n1"
+    ).mock(return_value=httpx.Response(200, json={"approved": True}))
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert await client.service("svc:web") == {"name": "svc:web"}
+    assert await client.service_hosts("svc:web") == [{"nodeId": "n1"}]
+    assert await client.service_host_approval("svc:web", "n1") == {"approved": True}
+    assert detail.called and hosts.called and approval.called
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_dns_client_collects_each_read_only_dns_resource() -> None:
+    prefix = "https://api.tailscale.com/api/v2/tailnet/example.com/dns"
+    respx.get(f"{prefix}/preferences").mock(
+        return_value=httpx.Response(200, json={"magicDNS": True})
+    )
+    respx.get(f"{prefix}/nameservers").mock(
+        return_value=httpx.Response(200, json={"dns": ["1.1.1.1"]})
+    )
+    respx.get(f"{prefix}/searchpaths").mock(
+        return_value=httpx.Response(200, json={"searchPaths": ["example.com"]})
+    )
+    respx.get(f"{prefix}/split-dns").mock(return_value=httpx.Response(200, json={}))
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    result = await client.dns()
+
+    assert result["preferences"] == {"magicDNS": True}
+    assert result["nameservers"] == {"dns": ["1.1.1.1"]}
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_webhook_client_accepts_null_as_an_empty_inventory() -> None:
+    route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/webhooks")
+    route.mock(return_value=httpx.Response(200, json={"webhooks": None}))
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert await client.webhooks() == []
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_webhook_client_rejects_an_unexpected_collection_shape() -> None:
+    route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/webhooks")
+    route.mock(return_value=httpx.Response(200, json={"webhooks": "not-a-list"}))
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    with pytest.raises(TailscaleError, match="Unexpected webhook inventory response"):
+        await client.webhooks()
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_keys_client_combines_typed_collections_without_requesting_secrets() -> None:
+    route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/keys")
+    route.mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "authKeys": [{"id": "tskey-auth-one"}],
+                "accessTokens": [{"id": "tskey-api-two"}],
+            },
+        )
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert await client.keys() == [
+        {"id": "tskey-auth-one"},
+        {"id": "tskey-api-two"},
+    ]
+    assert route.called
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_posture_and_feature_settings_use_read_only_paths() -> None:
+    attributes = respx.get(
+        "https://api.tailscale.com/api/v2/device/node%2Fone/attributes"
+    ).mock(return_value=httpx.Response(200, json={"attributes": {"node:os": "linux"}}))
+    settings = respx.get(
+        "https://api.tailscale.com/api/v2/tailnet/example.com/settings"
+    ).mock(return_value=httpx.Response(200, json={"devicesApprovalOn": True}))
+    integrations = respx.get(
+        "https://api.tailscale.com/api/v2/tailnet/example.com/posture/integrations"
+    ).mock(return_value=httpx.Response(200, json={"integrations": [{"id": "one"}]}))
+    detail = respx.get(
+        "https://api.tailscale.com/api/v2/posture/integrations/one"
+    ).mock(return_value=httpx.Response(200, json={"id": "one", "status": "connected"}))
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert (await client.posture_attributes("node/one"))["attributes"]["node:os"] == "linux"
+    assert (await client.tailnet_settings())["devicesApprovalOn"] is True
+    assert await client.posture_integrations() == [{"id": "one"}]
+    assert (await client.posture_integration("one"))["status"] == "connected"
+    assert attributes.called and settings.called and integrations.called and detail.called
+    await client.close()

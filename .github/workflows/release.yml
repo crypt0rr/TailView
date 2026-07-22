@@ -1,0 +1,479 @@
+name: Release candidate
+
+on:
+  push:
+    tags:
+      - "v*.*.*-rc.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-24.04
+    outputs:
+      core_version: ${{ steps.release.outputs.core_version }}
+      commit_time: ${{ steps.release.outputs.commit_time }}
+    steps:
+      - name: Check out complete release history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require a release-candidate semantic version tag
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.([1-9][0-9]*)$ ]]; then
+            echo "Candidate tags must use vMAJOR.MINOR.PATCH-rc.N." >&2
+            exit 1
+          fi
+          core="${RELEASE_TAG#v}"
+          echo "core_version=${core%%-*}" >> "$GITHUB_OUTPUT"
+          echo "commit_time=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+      - name: Require the tagged commit on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"
+
+  quality-gate:
+    needs: validate-tag
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.7.19"
+          enable-cache: true
+
+      - name: Verify backend
+        working-directory: backend
+        run: |
+          uv sync --frozen --extra dev
+          uv run ruff check app tests
+          uv run mypy app
+          uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=64
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/tailview-requirements.txt
+          uvx --from pip-audit==2.9.0 pip-audit --require-hashes --requirement /tmp/tailview-requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.18.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Verify frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
+          npm audit --omit=dev
+
+      - name: Verify production Compose definitions
+        run: |
+          python3 deploy/release_validate.py validate-exceptions --file .trivyignore.yaml
+          docker compose --env-file .env.example config --quiet
+          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.release.yml config --quiet
+
+  migration-gate:
+    needs: [validate-tag, quality-gate]
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa
+        env:
+          POSTGRES_DB: tailview_release
+          POSTGRES_USER: tailview
+          POSTGRES_PASSWORD: release-migration-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tailview -d tailview_release"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://tailview:release-migration-password@127.0.0.1:5432/tailview_release
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.14"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.7.19"
+          enable-cache: true
+      - working-directory: backend
+        run: uv sync --frozen --extra dev
+      - name: Verify fresh installation and 0013 data-preserving upgrade
+        working-directory: backend
+        run: |
+          uv run alembic upgrade head
+          PYTHONPATH=. uv run python tests/release_upgrade_check.py prepare
+          uv run alembic upgrade head
+          PYTHONPATH=. uv run python tests/release_upgrade_check.py verify
+
+  browser-gate:
+    needs: quality-gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Configure isolated demo browser environment
+        run: |
+          cp .env.example .env
+          sed -i 's/REPLACE-with-a-random-64-character-setup-token/release-browser-token-000000000000000000000000000000/' .env
+          sed -i 's/REPLACE-with-a-long-random-database-password/release-browser-database-password/' .env
+      - name: Run Administrator, Viewer, MFA, visual, and accessibility acceptance
+        run: docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from e2e e2e
+      - if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.test.yml logs --no-color && docker compose -f docker-compose.yml -f docker-compose.test.yml down -v
+
+  secret-scan:
+    needs: validate-tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Scan repository history for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  backup-gate:
+    needs: quality-gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Configure isolated backup rehearsal
+        run: |
+          cp .env.example .env
+          sed -i 's/REPLACE-with-a-random-64-character-setup-token/release-backup-token-0000000000000000000000000000000/' .env
+          sed -i 's/REPLACE-with-a-long-random-database-password/release-backup-database-password/' .env
+      - name: Start TailView and verify backup restore
+        run: |
+          docker compose up -d --build
+          timeout 180 sh -c 'until curl --fail --silent http://127.0.0.1:8080/health/ready; do sleep 2; done'
+          sh deploy/backup.sh /tmp/tailview-release.dump
+          sh deploy/verify-backup.sh /tmp/tailview-release.dump
+      - if: always()
+        run: docker compose logs --no-color && docker compose down -v
+
+  candidate-images:
+    needs: [validate-tag, migration-gate, browser-gate, secret-scan, backup-gate]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: tailview-backend
+            context: ./backend
+            target: runtime
+            description: TailView FastAPI backend and scheduler
+          - image: tailview-frontend
+            context: ./frontend
+            target: runtime
+            description: TailView unprivileged web frontend and reverse proxy
+          - image: tailview-telemetry-agent
+            context: ./deploy/telemetry-agent
+            target: runtime
+            description: Optional TailView local telemetry collector
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and OCI labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=candidate-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/README.md
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and publish multi-platform candidate image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            TAILVIEW_VERSION=${{ needs.validate-tag.outputs.core_version }}
+            TAILVIEW_REVISION=${{ github.sha }}
+            TAILVIEW_BUILD_TIME=${{ needs.validate-tag.outputs.commit_time }}
+
+      - name: Attest published image provenance
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Scan candidate image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:candidate-${{ github.sha }}
+          severity: HIGH,CRITICAL
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+
+      - name: Record candidate digest
+        run: printf '%s\n' '${{ steps.build.outputs.digest }}' > '${{ matrix.image }}.digest'
+
+      - name: Upload candidate digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}
+          path: ${{ matrix.image }}.digest
+          if-no-files-found: error
+
+      - name: Publish image summary
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### ${IMAGE}"
+            echo
+            echo "Published candidate manifest: \`${IMAGE}@${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  candidate-acceptance:
+    needs: [validate-tag, candidate-images]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v6
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure candidate deployment
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          cp .env.example .env
+          sed -i 's/REPLACE-with-a-random-64-character-setup-token/release-candidate-setup-token-000000000000000000000000000/' .env
+          sed -i 's/REPLACE-with-a-long-random-database-password/release-candidate-database-password/' .env
+          sed -i 's/COOKIE_SECURE=true/COOKIE_SECURE=false/' .env
+          sed -i 's/DEMO_MODE=false/DEMO_MODE=true/' .env
+          echo "TAILVIEW_IMAGE_NAMESPACE=ghcr.io/${OWNER,,}" >> .env
+          echo "TAILVIEW_VERSION=candidate-${GITHUB_SHA}" >> .env
+      - name: Pull and start only candidate images
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.release.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.release.yml pull
+          docker compose -f docker-compose.yml -f docker-compose.release.yml up -d
+          timeout 180 sh -c 'until curl --fail --silent http://127.0.0.1:8080/health/ready > /tmp/readiness.json; do sleep 2; done'
+          EXPECTED_VERSION="${{ needs.validate-tag.outputs.core_version }}" EXPECTED_REVISION="$GITHUB_SHA" python3 - <<'PY'
+          import json
+          import os
+
+          with open("/tmp/readiness.json", encoding="utf-8") as source:
+              readiness = json.load(source)
+          assert readiness["status"] == "ready"
+          assert readiness["schema"]["expected"] == ["0014_v1_completion"]
+          assert readiness["schema"]["current"] == ["0014_v1_completion"]
+          assert readiness["version"]["application"] == os.environ["EXPECTED_VERSION"]
+          assert readiness["version"]["revision"] == os.environ["EXPECTED_REVISION"]
+          assert readiness["version"]["buildTime"] not in {"", "unknown"}
+          PY
+      - name: Exercise setup, authenticated data, reports, and persistence
+        run: |
+          curl --fail --silent --show-error --cookie-jar /tmp/tailview.cookies \
+            -H 'Origin: http://localhost:8080' -H 'Content-Type: application/json' \
+            --data '{"setup_token":"release-candidate-setup-token-000000000000000000000000000","username":"release-admin","password":"release-candidate-password-2026"}' \
+            http://127.0.0.1:8080/api/v1/setup > /tmp/setup.json
+          curl --fail --silent --show-error --cookie /tmp/tailview.cookies \
+            http://127.0.0.1:8080/api/v1/dashboard > /tmp/dashboard.json
+          curl --fail --silent --show-error --cookie /tmp/tailview.cookies \
+            http://127.0.0.1:8080/api/v1/reports > /tmp/reports.json
+          report_id="$(python3 -c 'import json; print(json.load(open("/tmp/reports.json"))["items"][0]["id"])')"
+          curl --fail --silent --show-error --cookie /tmp/tailview.cookies \
+            "http://127.0.0.1:8080/api/v1/reports/${report_id}/download?format=json" > /tmp/report.json
+          test -s /tmp/report.json
+          docker compose -f docker-compose.yml -f docker-compose.release.yml restart
+          timeout 180 sh -c 'until curl --fail --silent http://127.0.0.1:8080/health/ready; do sleep 2; done'
+          curl --fail --silent --show-error --cookie /tmp/tailview.cookies \
+            http://127.0.0.1:8080/api/v1/auth/me > /tmp/me.json
+          grep -q 'release-admin' /tmp/me.json
+      - if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.release.yml logs --no-color
+          docker compose -f docker-compose.yml -f docker-compose.release.yml down -v
+
+  promote-rc-images:
+    needs: [candidate-acceptance, candidate-images]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        image: [tailview-backend, tailview-frontend, tailview-telemetry-agent]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}
+          path: digests
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify candidate platforms and promote the accepted digest to the RC tag
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          candidate="${IMAGE}:candidate-${GITHUB_SHA}"
+          docker buildx imagetools inspect "$candidate" > /tmp/manifest.txt
+          grep -q 'linux/amd64' /tmp/manifest.txt
+          grep -q 'linux/arm64' /tmp/manifest.txt
+          expected="$(cat 'digests/${{ matrix.image }}.digest')"
+          actual="$(awk '/^Digest:/ {print $2; exit}' /tmp/manifest.txt)"
+          test "$actual" = "$expected"
+          version="${RELEASE_TAG#v}"
+          docker buildx imagetools create --tag "${IMAGE}:${version}" "${IMAGE}@${expected}"
+          promoted="$(docker buildx imagetools inspect "${IMAGE}:${version}" | awk '/^Digest:/ {print $2; exit}')"
+          test "$promoted" = "$expected"
+
+  github-release:
+    needs: [validate-tag, promote-rc-images]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v6
+
+      - name: Download candidate digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Build deployment bundle
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          bundle="tailview-${version}-compose"
+          mkdir "$bundle"
+          cp docker-compose.yml docker-compose.release.yml docker-compose.soak.yml .env.example LICENSE "$bundle/"
+          mkdir "$bundle/deploy"
+          cp deploy/Caddyfile deploy/backup.sh deploy/restore.sh deploy/verify-backup.sh \
+            deploy/release_validate.py deploy/soak-common.sh deploy/soak-start.sh deploy/soak-login.sh \
+            deploy/soak-check.sh deploy/soak-restart.sh deploy/soak-finish.sh deploy/soak_evidence.py "$bundle/deploy/"
+          tar -czf "${bundle}.tar.gz" "$bundle"
+          sha256sum "${bundle}.tar.gz" > "${bundle}.tar.gz.sha256"
+
+      - name: Create signed-image digest manifest
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          CORE_VERSION: ${{ needs.validate-tag.outputs.core_version }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          version = os.environ["RELEASE_TAG"][1:]
+          images = {
+              name: Path(f"digests/{name}.digest").read_text().strip()
+              for name in ("tailview-backend", "tailview-frontend", "tailview-telemetry-agent")
+          }
+          Path(f"tailview-{version}-image-digests.json").write_text(
+              json.dumps({"schema_version": 1, "candidate_tag": os.environ["RELEASE_TAG"], "core_version": os.environ["CORE_VERSION"], "source_commit": os.environ["GITHUB_SHA"], "images": images}, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          backend_digest="$(cat digests/tailview-backend.digest)"
+          frontend_digest="$(cat digests/tailview-frontend.digest)"
+          telemetry_digest="$(cat digests/tailview-telemetry-agent.digest)"
+          cat > release-container-notes.md <<EOF
+          ## Container images
+
+          This release publishes signed, multi-platform images for AMD64 and ARM64:
+
+          - \`ghcr.io/${OWNER,,}/tailview-backend:${version}@${backend_digest}\`
+          - \`ghcr.io/${OWNER,,}/tailview-frontend:${version}@${frontend_digest}\`
+          - \`ghcr.io/${OWNER,,}/tailview-telemetry-agent:${version}@${telemetry_digest}\`
+
+          Download the Compose bundle attached below, copy \`.env.example\` to \`.env\`, replace every secret, and run:
+
+          \`TAILVIEW_VERSION=${version} docker compose -f docker-compose.yml -f docker-compose.release.yml up -d\`
+
+          The \`latest\` tag is updated only for stable releases. Pin a version or image digest for reproducible production deployments.
+          EOF
+          gh release create "$RELEASE_TAG" \
+            "tailview-${version}-compose.tar.gz" \
+            "tailview-${version}-compose.tar.gz.sha256" \
+            "tailview-${version}-image-digests.json" \
+            --verify-tag --generate-notes --prerelease --title "TailView ${RELEASE_TAG}" \
+            --notes "$(cat release-container-notes.md)"

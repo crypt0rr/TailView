@@ -1,0 +1,8 @@
+# Historical public placeholder: the documented example decoded to 32 bytes but
+# was never a production encryption key. The current template uses a visibly
+# zero-filled value instead.
+0354fdaefb90b49acdc9c2e5aa6903e775dc6a62:.env.example:generic-api-key:9
+
+# Historical false positive: the empty TAILSCALE_API_TOKEN assignment was
+# combined with the following environment setting by the generic API-key rule.
+0354fdaefb90b49acdc9c2e5aa6903e775dc6a62:.env.example:generic-api-key:21
