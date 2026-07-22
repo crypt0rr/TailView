@@ -1,0 +1,23 @@
+name: ${TAILVIEW_SOAK_PROJECT:-tailview-soak}
+
+services:
+  database:
+    container_name: !reset null
+    volumes:
+      - tailview-soak-db:/var/lib/postgresql/data
+  backend:
+    container_name: !reset null
+  frontend:
+    container_name: !reset null
+    ports: !override
+      - "127.0.0.1:${TAILVIEW_SOAK_PORT:-18080}:8080"
+  caddy:
+    container_name: !reset null
+  telemetry-agent:
+    container_name: !reset null
+
+volumes:
+  tailview-db: !reset null
+  tailview-soak-db:
+    name: ${TAILVIEW_SOAK_PROJECT:-tailview-soak}-postgres-data
+

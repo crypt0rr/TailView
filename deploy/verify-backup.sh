@@ -48,7 +48,7 @@ fi
 docker network create "$network" >/dev/null
 docker run -d --name "$container" --network "$network" \
   -e POSTGRES_DB=tailview_verify -e POSTGRES_USER=tailview_verify -e POSTGRES_PASSWORD="$password" \
-  postgres:17.5-alpine >/dev/null
+  postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa >/dev/null
 
 attempt=0
 until docker exec "$container" pg_isready -U tailview_verify -d tailview_verify >/dev/null 2>&1; do

@@ -79,6 +79,10 @@ Record incidents, accepted limitations, and remediation links:
 - [ ] Known limitations are published and acceptable for v1.0
 - [ ] Rollback owner and maintenance window are confirmed
 - [ ] Stable release is from the same tested, clean default-branch commit
+- [ ] Signed evidence manifest is attached to the candidate GitHub Release
+- [ ] Stable tag contains the exact candidate and evidence SHA-256 trailers
+- [ ] Protected `stable-release` approval was recorded
+- [ ] Stable, minor, major, and `latest` digests equal all three accepted RC digests
 - [ ] `latest` will move only for `v1.0.0`, never for the release candidate
 
 Decision: `GO / NO-GO`

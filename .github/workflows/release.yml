@@ -1,9 +1,9 @@
-name: Release
+name: Release candidate
 
 on:
   push:
     tags:
-      - "v*"
+      - "v*.*.*-rc.*"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -18,19 +18,26 @@ env:
 jobs:
   validate-tag:
     runs-on: ubuntu-24.04
+    outputs:
+      core_version: ${{ steps.release.outputs.core_version }}
+      commit_time: ${{ steps.release.outputs.commit_time }}
     steps:
       - name: Check out complete release history
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Require a semantic version tag
+      - name: Require a release-candidate semantic version tag
+        id: release
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
-            echo "Release tags must use vMAJOR.MINOR.PATCH, optionally followed by a prerelease suffix." >&2
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.([1-9][0-9]*)$ ]]; then
+            echo "Candidate tags must use vMAJOR.MINOR.PATCH-rc.N." >&2
             exit 1
           fi
+          core="${RELEASE_TAG#v}"
+          echo "core_version=${core%%-*}" >> "$GITHUB_OUTPUT"
+          echo "commit_time=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
       - name: Require the tagged commit on the default branch
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -84,6 +91,7 @@ jobs:
 
       - name: Verify production Compose definitions
         run: |
+          python3 deploy/release_validate.py validate-exceptions --file .trivyignore.yaml
           docker compose --env-file .env.example config --quiet
           docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.release.yml config --quiet
 
@@ -92,7 +100,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:17.5-alpine
+        image: postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa
         env:
           POSTGRES_DB: tailview_release
           POSTGRES_USER: tailview
@@ -169,7 +177,7 @@ jobs:
         run: docker compose logs --no-color && docker compose down -v
 
   candidate-images:
-    needs: [migration-gate, browser-gate, secret-scan, backup-gate]
+    needs: [validate-tag, migration-gate, browser-gate, secret-scan, backup-gate]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -224,12 +232,6 @@ jobs:
             org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/README.md
             org.opencontainers.image.licenses=MIT
 
-      - name: Capture reproducible build time
-        id: build-time
-        run: |
-          echo "value=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
       - name: Build and publish multi-platform candidate image
         id: build
         uses: docker/build-push-action@v7
@@ -246,9 +248,9 @@ jobs:
           provenance: mode=max
           sbom: true
           build-args: |
-            TAILVIEW_VERSION=${{ steps.build-time.outputs.version }}
+            TAILVIEW_VERSION=${{ needs.validate-tag.outputs.core_version }}
             TAILVIEW_REVISION=${{ github.sha }}
-            TAILVIEW_BUILD_TIME=${{ steps.build-time.outputs.value }}
+            TAILVIEW_BUILD_TIME=${{ needs.validate-tag.outputs.commit_time }}
 
       - name: Attest published image provenance
         uses: actions/attest@v4
@@ -287,7 +289,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   candidate-acceptance:
-    needs: candidate-images
+    needs: [validate-tag, candidate-images]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -318,7 +320,7 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.release.yml pull
           docker compose -f docker-compose.yml -f docker-compose.release.yml up -d
           timeout 180 sh -c 'until curl --fail --silent http://127.0.0.1:8080/health/ready > /tmp/readiness.json; do sleep 2; done'
-          EXPECTED_VERSION="${GITHUB_REF_NAME#v}" EXPECTED_REVISION="$GITHUB_SHA" python3 - <<'PY'
+          EXPECTED_VERSION="${{ needs.validate-tag.outputs.core_version }}" EXPECTED_REVISION="$GITHUB_SHA" python3 - <<'PY'
           import json
           import os
 
@@ -355,8 +357,8 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.release.yml logs --no-color
           docker compose -f docker-compose.yml -f docker-compose.release.yml down -v
 
-  promote-images:
-    needs: candidate-acceptance
+  promote-rc-images:
+    needs: [candidate-acceptance, candidate-images]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -365,13 +367,17 @@ jobs:
       matrix:
         image: [tailview-backend, tailview-frontend, tailview-telemetry-agent]
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}
+          path: digests
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify candidate platforms and promote tested manifest
+      - name: Verify candidate platforms and promote the accepted digest to the RC tag
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
           RELEASE_TAG: ${{ github.ref_name }}
@@ -380,18 +386,16 @@ jobs:
           docker buildx imagetools inspect "$candidate" > /tmp/manifest.txt
           grep -q 'linux/amd64' /tmp/manifest.txt
           grep -q 'linux/arm64' /tmp/manifest.txt
+          expected="$(cat 'digests/${{ matrix.image }}.digest')"
+          actual="$(awk '/^Digest:/ {print $2; exit}' /tmp/manifest.txt)"
+          test "$actual" = "$expected"
           version="${RELEASE_TAG#v}"
-          tags=(--tag "${IMAGE}:${version}")
-          if [[ "$version" != *-* ]]; then
-            major="${version%%.*}"
-            remainder="${version#*.}"
-            minor="${remainder%%.*}"
-            tags+=(--tag "${IMAGE}:${major}.${minor}" --tag "${IMAGE}:${major}" --tag "${IMAGE}:latest")
-          fi
-          docker buildx imagetools create "${tags[@]}" "$candidate"
+          docker buildx imagetools create --tag "${IMAGE}:${version}" "${IMAGE}@${expected}"
+          promoted="$(docker buildx imagetools inspect "${IMAGE}:${version}" | awk '/^Digest:/ {print $2; exit}')"
+          test "$promoted" = "$expected"
 
   github-release:
-    needs: promote-images
+    needs: [validate-tag, promote-rc-images]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -413,11 +417,31 @@ jobs:
           version="${RELEASE_TAG#v}"
           bundle="tailview-${version}-compose"
           mkdir "$bundle"
-          cp docker-compose.yml docker-compose.release.yml .env.example LICENSE "$bundle/"
+          cp docker-compose.yml docker-compose.release.yml docker-compose.soak.yml .env.example LICENSE "$bundle/"
           mkdir "$bundle/deploy"
-          cp deploy/Caddyfile deploy/backup.sh deploy/restore.sh deploy/verify-backup.sh "$bundle/deploy/"
+          cp deploy/Caddyfile deploy/backup.sh deploy/restore.sh deploy/verify-backup.sh \
+            deploy/release_validate.py deploy/soak-common.sh deploy/soak-start.sh deploy/soak-login.sh \
+            deploy/soak-check.sh deploy/soak-restart.sh deploy/soak-finish.sh deploy/soak_evidence.py "$bundle/deploy/"
           tar -czf "${bundle}.tar.gz" "$bundle"
           sha256sum "${bundle}.tar.gz" > "${bundle}.tar.gz.sha256"
+
+      - name: Create signed-image digest manifest
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          CORE_VERSION: ${{ needs.validate-tag.outputs.core_version }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          version = os.environ["RELEASE_TAG"][1:]
+          images = {
+              name: Path(f"digests/{name}.digest").read_text().strip()
+              for name in ("tailview-backend", "tailview-frontend", "tailview-telemetry-agent")
+          }
+          Path(f"tailview-{version}-image-digests.json").write_text(
+              json.dumps({"schema_version": 1, "candidate_tag": os.environ["RELEASE_TAG"], "core_version": os.environ["CORE_VERSION"], "source_commit": os.environ["GITHUB_SHA"], "images": images}, indent=2, sort_keys=True) + "\n"
+          )
+          PY
 
       - name: Create GitHub Release
         env:
@@ -444,13 +468,9 @@ jobs:
 
           The \`latest\` tag is updated only for stable releases. Pin a version or image digest for reproducible production deployments.
           EOF
-          release_args=(--verify-tag --generate-notes --title "TailView ${RELEASE_TAG}" --notes "$(cat release-container-notes.md)")
-          if [[ "$RELEASE_TAG" == *-* ]]; then
-            release_args+=(--prerelease)
-          else
-            release_args+=(--latest)
-          fi
           gh release create "$RELEASE_TAG" \
             "tailview-${version}-compose.tar.gz" \
             "tailview-${version}-compose.tar.gz.sha256" \
-            "${release_args[@]}"
+            "tailview-${version}-image-digests.json" \
+            --verify-tag --generate-notes --prerelease --title "TailView ${RELEASE_TAG}" \
+            --notes "$(cat release-container-notes.md)"

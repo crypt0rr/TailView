@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:17.5-alpine
+        image: postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa
         env:
           POSTGRES_DB: tailview_migrations
           POSTGRES_USER: tailview
@@ -137,3 +137,25 @@ jobs:
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
+
+  release-tooling:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release and promotion workflows
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+      - name: Validate soak shell tooling
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            koalaman/shellcheck-alpine:v0.10.0@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
+            shellcheck -x deploy/soak-common.sh deploy/soak-start.sh deploy/soak-login.sh \
+            deploy/soak-check.sh deploy/soak-restart.sh deploy/soak-finish.sh
+      - name: Validate release safety rules and isolated Compose
+        run: |
+          python3 deploy/release_validate.py core-version v1.0.0-rc.1
+          python3 deploy/release_validate.py validate-exceptions --file .trivyignore.yaml
+          TAILVIEW_SOAK_PROJECT=tailview-soak TAILVIEW_SOAK_PORT=18080 \
+            docker compose --project-name tailview-soak --env-file .env.example \
+              -f docker-compose.yml -f docker-compose.release.yml -f docker-compose.soak.yml config --quiet

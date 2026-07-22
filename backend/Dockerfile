@@ -1,11 +1,11 @@
-FROM python:3.13.14-alpine AS builder
-COPY --from=ghcr.io/astral-sh/uv:0.7.19 /uv /bin/uv
+FROM python:3.13.14-alpine@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0 AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.7.19@sha256:2dcbc74e60ed6d842122ed538f5267c80e7cde4ff1b6e66a199b89972496f033 /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/venv
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-FROM python:3.13.14-alpine AS runtime
+FROM python:3.13.14-alpine@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0 AS runtime
 ARG TAILVIEW_VERSION=dev
 ARG TAILVIEW_REVISION=unknown
 ARG TAILVIEW_BUILD_TIME=unknown
