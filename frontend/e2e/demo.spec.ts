@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import axe from "axe-core";
 
 async function authenticate(page: import("@playwright/test").Page) {
   const username = process.env.E2E_USERNAME ?? "smoke-admin";
@@ -49,7 +50,53 @@ test("demo reporting exposes trends, immutable evidence, and schedules", async (
   await expect(page.getByRole("link", { name: /PDF/ })).toBeVisible();
   await expect(page.getByText("Reproducibility")).toBeVisible();
   await page.getByLabel("Close report").click();
-  await page.getByRole("button", { name: "Schedules" }).click();
+  await page.getByRole("tab", { name: "Schedules" }).click();
   await expect(page.getByText("Weekly production usage")).toBeVisible();
   await expect(page.getByText("Recent runs")).toBeVisible();
+});
+
+test("device workspaces expose metadata, table topology, history, and telemetry", async ({ page }) => {
+  await authenticate(page);
+  await page.getByRole("button", { name: "Topology" }).click();
+  await page.getByRole("button", { name: "Table" }).click();
+  await expect(page.getByLabel("Topology table alternative")).toBeVisible();
+  await page.getByRole("button", { name: "Production API" }).click();
+  await expect(page.getByText("TailView local metadata")).toBeVisible();
+  await page.getByRole("button", { name: "history" }).click();
+  await expect(page.getByText(/history begins after/i)).toBeVisible();
+  await page.getByLabel("Close device details").click();
+  await page.getByRole("button", { name: "Telemetry" }).click();
+  await expect(page.getByRole("heading", { name: "Telemetry" })).toBeVisible();
+  await expect(page.getByText(/never a tailnet-wide live view/i)).toBeVisible();
+});
+
+test("primary workspaces have no serious automated accessibility violations", async ({ page }) => {
+  await authenticate(page);
+  const routes = [
+    "/", "/topology?mode=table", "/flows", "/devices", "/users", "/groups",
+    "/routes", "/services", "/exit-nodes", "/subnet-routers", "/tags", "/policy",
+    "/security/posture", "/findings", "/security/governance", "/audit", "/sync",
+    "/dns", "/telemetry", "/reports", "/operations", "/settings",
+    "/settings/access", "/security/account",
+  ];
+  for (const route of routes) {
+    await page.goto(route);
+    await expect(page.locator("main h1").first()).toBeVisible();
+    // Playwright's isolated evaluation is intentionally used so production CSP
+    // remains strict and does not need an unsafe-inline exception for testing.
+    await page.evaluate(axe.source);
+    const violations = await page.evaluate(async () => {
+      const engine = (window as unknown as {
+        axe: { run: (options: object) => Promise<{ violations: Array<{ id: string; impact: string | null }> }> };
+      }).axe;
+      const result = await engine.run({
+        runOnly: { type: "tag", values: ["wcag2a", "wcag2aa"] },
+        // axe cannot reliably resolve this UI's color-mix/backdrop composition;
+        // palette contrast is covered separately by token-level visual checks.
+        rules: { "color-contrast": { enabled: false } },
+      });
+      return result.violations.filter((violation) => violation.impact === "critical" || violation.impact === "serious");
+    });
+    expect(violations, `Accessibility violations on ${route}`).toEqual([]);
+  }
 });

@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     audit_interval_seconds: int = 300
     flow_retention_days: int = 30
     raw_payload_retention_days: int = 7
+    device_history_retention_days: int = Field(default=365, ge=30, le=3650)
+    telemetry_retention_days: int = Field(default=30, ge=1, le=365)
     export_row_limit: int = Field(default=10000, ge=1, le=100000)
     saved_view_limit: int = Field(default=50, ge=1, le=500)
     flow_hourly_aggregate_retention_days: int = Field(default=90, ge=30, le=400)

@@ -40,3 +40,11 @@ The device API supplies Tailnet IPv4 and IPv6 addresses but does not supply auth
 For device troubleshooting, TailView can also summarize physical endpoint candidates from retained network flow logs. A candidate is attributed only when the physical-flow source resolves to the selected device's synchronized Tailnet address. Candidates are grouped by IP and classified locally; no reverse DNS, geolocation, active probing, or external enrichment is performed.
 
 Physical endpoint values remain client-reported and unverified. They may represent NAT mappings, relay infrastructure, temporary ports, or spoofed data, so TailView never labels them as authoritative device interface addresses. The verified reporting-node ID, observation window, ports, volume, and provenance remain attached to the summary.
+
+## Optional local telemetry
+
+Local telemetry is not a Tailscale management API capability. An explicitly enabled collector reads
+documented `tailscale status --json` and `tailscale netcheck` output from its mounted local socket and
+sends signed snapshots to TailView. The capability becomes available only after a valid observation
+is received. Normalized results remain collector-specific, timestamped local evidence; raw redacted
+diagnostics are never returned through Viewer response schemas.

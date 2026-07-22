@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
-import { Shell, nav, partitionNavigation } from "./App";
+import { navigationForRole, Shell, nav, partitionNavigation } from "./App";
 import * as apiModule from "./api";
 import { api } from "./api";
 import {
@@ -29,6 +29,25 @@ import type { AddressInventory, Device } from "./types";
 describe("TailView", () => {
   it("keeps the product name stable", () => {
     expect("TailView").toMatch(/TailView/);
+  });
+
+  it("keeps administrator-only workspaces out of Viewer navigation", () => {
+    const viewerLabels = navigationForRole("viewer").map(([label]) => label);
+
+    expect(viewerLabels).not.toContain("Operations");
+    expect(viewerLabels).not.toContain("Access governance");
+    expect(viewerLabels).not.toContain("DNS");
+    expect(viewerLabels).not.toContain("Settings");
+    expect(viewerLabels).toEqual(expect.arrayContaining([
+      "Dashboard",
+      "Topology",
+      "Flows",
+      "Reports",
+      "Devices",
+      "Policy",
+      "Security posture",
+      "Findings",
+    ]));
   });
 
   it("moves unavailable and successfully empty inventories out of active navigation", () => {
@@ -187,6 +206,8 @@ describe("TailView", () => {
     expect(await screen.findByText("TailView access")).toBeTruthy();
     expect(screen.getByText("Local Viewer")).toBeTruthy();
     expect(screen.getByText("Password change required")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Change role" }).classList.contains("button")).toBe(true);
+    expect(screen.getByRole("button", { name: "Change role" }).classList.contains("ghost")).toBe(true);
     request.mockRestore();
   });
 

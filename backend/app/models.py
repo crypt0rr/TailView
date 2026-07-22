@@ -235,11 +235,16 @@ class LocalMetadata(Base):
     display_name: Mapped[str | None] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
     function: Mapped[str | None] = mapped_column(String(128))
+    functional_groups: Mapped[list[str]] = mapped_column(JSON, default=list)
+    custom_roles: Mapped[list[str]] = mapped_column(JSON, default=list)
+    primary_role_override: Mapped[str | None] = mapped_column(String(64))
     environment: Mapped[str | None] = mapped_column(String(64))
     location: Mapped[str | None] = mapped_column(String(128))
     criticality: Mapped[str | None] = mapped_column(String(32))
     icon: Mapped[str | None] = mapped_column(String(64))
     hidden: Mapped[bool] = mapped_column(Boolean, default=False)
+    default_map_visible: Mapped[bool] = mapped_column(Boolean, default=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
@@ -828,9 +833,45 @@ class RawPayload(Base):
 
 class TelemetryObservation(Base):
     __tablename__ = "telemetry_observations"
+    __table_args__ = (
+        Index(
+            "ix_telemetry_collector_device_time",
+            "collector_device_id",
+            "observed_at",
+        ),
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     collector_node_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    collector_device_id: Mapped[str | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL")
+    )
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     scope: Mapped[str] = mapped_column(String(64), default="single_collector_node")
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    client_version: Mapped[str] = mapped_column(String(64), default="")
+    udp: Mapped[bool | None] = mapped_column(Boolean)
+    ipv4: Mapped[bool | None] = mapped_column(Boolean)
+    ipv6: Mapped[bool | None] = mapped_column(Boolean)
+    mapping_varies_by_dest_ip: Mapped[bool | None] = mapped_column(Boolean)
+    preferred_derp: Mapped[str | None] = mapped_column(String(64))
+    endpoints: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    derp_latency: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DeviceHistoryEvent(Base):
+    __tablename__ = "device_history_events"
+    __table_args__ = (
+        Index("ix_device_history_device_time_id", "device_id", "occurred_at", "id"),
+        Index("ix_device_history_source_type", "source", "event_type"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    device_id: Mapped[str] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    source: Mapped[str] = mapped_column(String(32), default="device_sync", index=True)
+    changed_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
+    before: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    after: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    actor_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    correlation_id: Mapped[str] = mapped_column(String(128), default="")
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

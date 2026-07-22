@@ -14,14 +14,21 @@ import {
 export function Button({
   children,
   variant = "primary",
+  className = "",
   ...props
 }: PropsWithChildren<
   React.ButtonHTMLAttributes<HTMLButtonElement> & {
     variant?: "primary" | "secondary" | "ghost" | "danger";
   }
 >) {
+  const classes = className.split(/\s+/).filter(Boolean);
+  const legacyVariant = classes.find((value) =>
+    ["primary", "secondary", "ghost", "danger"].includes(value),
+  );
+  const appearance = legacyVariant ?? variant;
+  const extraClasses = classes.filter((value) => value !== legacyVariant);
   return (
-    <button className={`button ${variant}`} {...props}>
+    <button className={["button", appearance, ...extraClasses].join(" ")} {...props}>
       {children}
     </button>
   );

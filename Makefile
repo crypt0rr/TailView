@@ -9,7 +9,7 @@ lint:
 	docker run --rm -v "$(CURDIR)/backend:/app" -w /app python:3.13.5-slim sh -c "pip install -q '.[dev]' && ruff check app tests && mypy app"
 test:
 	cd frontend && npm test
-	docker run --rm -v "$(CURDIR)/backend:/app" -w /app python:3.13.5-slim sh -c "pip install -q '.[dev]' && pytest --cov=app"
+	docker run --rm -v "$(CURDIR)/backend:/app" -w /app python:3.13.5-slim sh -c "pip install -q '.[dev]' && PYTHONPATH=/app pytest --cov=app"
 compose-check:
 	docker compose --env-file .env.example config --quiet
 up:

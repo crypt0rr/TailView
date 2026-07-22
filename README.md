@@ -8,7 +8,7 @@ TailView is a self-hosted, read-only observability dashboard for a Tailscale tai
 
 - One-time setup-token bootstrap, Argon2id passwords, optional TOTP MFA, recovery codes, revocable server-side sessions, administrator/viewer RBAC, progressive login throttling, and CSRF protection.
 - Administrator-managed TailView accounts remain separate from tailnet users. Temporary passwords require replacement, users can inspect and revoke their own sessions, and Administrators can manage fleet sessions, MFA policy, and immutable local security history under **Settings → TailView access**.
-- Device/user inventory with multi-role classification, routes, tags, local metadata, and provenance.
+- Device/user inventory with multi-role classification, routes, tags, editable TailView-local metadata, durable change history, current-policy access explanations, and provenance.
 - Private or team-shared saved workspaces with authenticated links and personal page defaults.
 - A Security posture workspace with typed device attributes, expiry/freshness coverage, current-policy evaluation, conservative findings, feature settings, and redacted integration inventory.
 - Administrator-only access governance for credential metadata, device invites, tailnet contacts, log-stream status, expiry, and conservative review findings. TailView never requests usable secret values.
@@ -23,7 +23,8 @@ TailView is a self-hosted, read-only observability dashboard for a Tailscale tai
 - Configuration audit events, synchronization history, independent capability states, Prometheus metrics, and structured logs.
 - Administrator Operations center for scheduler health, queue delay, PostgreSQL growth, retention safety, aggregate coverage, and isolated backup verification.
 - Administrator DNS inventory covering MagicDNS preferences, nameservers, search domains, split-DNS routing, freshness, and API provenance.
-- Isolated demo mode and an explicitly opt-in local telemetry profile.
+- Isolated demo mode, a capability-aware local telemetry workspace, and an explicitly opt-in collector profile.
+- Accessible graph/table topology presentations over the same filtered nodes and visible relationships.
 
 ## Quick start
 

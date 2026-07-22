@@ -53,9 +53,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { request } from "./api";
+import { request, type CurrentUser } from "./api";
 import { SavedViews } from "./savedViews";
 import { useTimeRange } from "./timeRange";
+import { useDialogFocus } from "./useDialogFocus";
 import {
   Badge,
   Button,
@@ -73,6 +74,8 @@ import type {
   AddressInventory,
   AppSession,
   Device,
+  DeviceAccessRelationship,
+  DeviceHistoryEvent,
   DnsConfiguration,
   FlowRecord,
   FlowDeviceTraffic,
@@ -98,6 +101,7 @@ import type {
   SecurityPostureSummary,
   TailViewAccount,
   TopologyData,
+  TelemetryObservation,
 } from "./types";
 
 const palette = [
@@ -285,6 +289,14 @@ export function Findings({ user }: { user: FindingsUser }) {
   });
   const [newSecret, setNewSecret] = useState("");
   const [suppressionDuration, setSuppressionDuration] = useState("24h");
+  const findingDialogRef = useDialogFocus(() => {
+    setSelectedId("");
+    setParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete("finding");
+      return next;
+    });
+  }, Boolean(selectedId));
   const queryClient = useQueryClient();
   const filterKeys = useMemo(
     () => ["status", "severity", "source", "category", "subject", "assigned_to", "search"] as const,
@@ -404,7 +416,7 @@ export function Findings({ user }: { user: FindingsUser }) {
   return <div className="page findings-page">
     <PageHead eyebrow="SECURITY & OPERATIONS" title="Findings" description="Durable signals with recurrence, acknowledgement, suppression, and resolution history." actions={<Badge tone={totals.open ? "warning" : "success"}>{totals.open} active</Badge>} />
     <SavedViews page="findings" state={findingViewState} builtIn={{ status: "", severity: "", source: "", category: "", subject: "", assigned_to: "", search: "" }} apply={applyFindingView} hasExplicitState={findingHasExplicitState} />
-    {user.role === "administrator" && <div className="tabs" role="tablist" aria-label="Findings workspace"><button className={tab === "findings" ? "active" : ""} onClick={() => setTab("findings")}>Findings</button><button className={tab === "notifications" ? "active" : ""} onClick={() => setTab("notifications")}>Notifications</button></div>}
+    {user.role === "administrator" && <div className="tabs" role="tablist" aria-label="Findings workspace"><button role="tab" aria-selected={tab === "findings"} className={tab === "findings" ? "active" : ""} onClick={() => setTab("findings")}>Findings</button><button role="tab" aria-selected={tab === "notifications"} className={tab === "notifications" ? "active" : ""} onClick={() => setTab("notifications")}>Notifications</button></div>}
     {tab === "findings" && <>
       <div className="posture-metrics findings-metrics">
         {(["open", "acknowledged", "suppressed", "resolved"] as const).map((status) => <Card className="posture-metric" key={status}><span>{status}</span><strong>{totals.by_status[status] ?? 0}</strong></Card>)}
@@ -420,7 +432,7 @@ export function Findings({ user }: { user: FindingsUser }) {
         {user.role === "administrator" && <select aria-label="Finding assignment" value={filters.assigned_to} onChange={(event) => setFilter("assigned_to", event.target.value)}><option value="">All assignments</option><option value="unassigned">Unassigned</option>{assignees.data?.items.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.username}</option>)}</select>}
       </div>
       <Card className="table-card">
-        <div className="table-scroll"><table><thead><tr><th>Severity</th><th>Finding</th><th>Subject</th><th>Source</th><th>Status</th><th>Last seen</th><th>Recurrences</th></tr></thead><tbody>{rows.map((finding) => <tr key={finding.id} className="clickable-row" onClick={() => openFinding(finding.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openFinding(finding.id); }}><td><Badge tone={finding.severity === "critical" || finding.severity === "high" ? "danger" : finding.severity === "medium" ? "warning" : "neutral"}>{finding.severity}</Badge></td><td><strong>{finding.title}</strong>{finding.stale && <small className="block">stale evaluation</small>}</td><td>{finding.subject_display}</td><td>{finding.source.replaceAll("_", " ")}</td><td><Badge tone={finding.status === "open" ? "warning" : finding.status === "resolved" ? "success" : "neutral"}>{finding.status}</Badge></td><td>{relativeTime(finding.last_seen)}</td><td>{finding.occurrence_count}</td></tr>)}</tbody></table></div>
+        <div className="table-scroll" tabIndex={0}><table><thead><tr><th>Severity</th><th>Finding</th><th>Subject</th><th>Source</th><th>Status</th><th>Last seen</th><th>Recurrences</th></tr></thead><tbody>{rows.map((finding) => <tr key={finding.id} className="clickable-row" onClick={() => openFinding(finding.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") openFinding(finding.id); }}><td><Badge tone={finding.severity === "critical" || finding.severity === "high" ? "danger" : finding.severity === "medium" ? "warning" : "neutral"}>{finding.severity}</Badge></td><td><strong>{finding.title}</strong>{finding.stale && <small className="block">stale evaluation</small>}</td><td>{finding.subject_display}</td><td>{finding.source.replaceAll("_", " ")}</td><td><Badge tone={finding.status === "open" ? "warning" : finding.status === "resolved" ? "success" : "neutral"}>{finding.status}</Badge></td><td>{relativeTime(finding.last_seen)}</td><td>{finding.occurrence_count}</td></tr>)}</tbody></table></div>
         {!findings.isLoading && !rows.length && <Empty title="No findings" detail="No signals match these filters. Zero active findings is a meaningful healthy state." icon={<ShieldCheck />} />}
         {findings.hasNextPage && <div className="load-more"><Button variant="secondary" onClick={() => findings.fetchNextPage()} disabled={findings.isFetchingNextPage}>{findings.isFetchingNextPage ? "Loading…" : "Load more"}</Button></div>}
       </Card>
@@ -439,9 +451,9 @@ export function Findings({ user }: { user: FindingsUser }) {
         </form>
       </Card>
       <Card className="table-card"><CardHead title="Endpoints" detail="URLs are sanitized after storage." /><div className="compact-list">{endpoints.data?.items.map((endpoint) => <div key={endpoint.id}><span><strong>{endpoint.name}</strong><small className="block"><code>{endpoint.url}</code> · {endpoint.minimum_severity}+{endpoint.sources.length ? ` · ${endpoint.sources.join(", ")}` : ""}</small></span><Badge tone={endpoint.enabled ? "success" : "neutral"}>{endpoint.enabled ? "enabled" : "disabled"}</Badge><Button variant="ghost" onClick={() => endpointAction.mutate({ id: endpoint.id, operation: "test" })} disabled={!endpoint.enabled}>Test</Button>{endpoint.enabled && <Button variant="ghost" onClick={() => endpointAction.mutate({ id: endpoint.id, operation: "disable" })}>Disable</Button>}</div>)}</div>{!endpoints.isLoading && !endpoints.data?.items.length && <Empty title="No notification endpoints" detail="In-app findings remain available without outbound delivery." />}</Card>
-      <Card className="table-card notification-history"><CardHead title="Delivery history" detail="Response bodies and credentials are never stored." /><div className="table-scroll"><table><thead><tr><th>Event</th><th>Status</th><th>Attempts</th><th>HTTP</th><th>Created</th></tr></thead><tbody>{deliveries.data?.items.map((delivery) => <tr key={delivery.id}><td>{delivery.event_type}</td><td><Badge tone={delivery.status === "delivered" ? "success" : delivery.status === "failed" ? "danger" : "neutral"}>{delivery.status}</Badge></td><td>{delivery.attempt_count}</td><td>{delivery.http_status ?? delivery.error_class ?? "—"}</td><td>{relativeTime(delivery.created_at)}</td></tr>)}</tbody></table></div></Card>
+      <Card className="table-card notification-history"><CardHead title="Delivery history" detail="Response bodies and credentials are never stored." /><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Event</th><th>Status</th><th>Attempts</th><th>HTTP</th><th>Created</th></tr></thead><tbody>{deliveries.data?.items.map((delivery) => <tr key={delivery.id}><td>{delivery.event_type}</td><td><Badge tone={delivery.status === "delivered" ? "success" : delivery.status === "failed" ? "danger" : "neutral"}>{delivery.status}</Badge></td><td>{delivery.attempt_count}</td><td>{delivery.http_status ?? delivery.error_class ?? "—"}</td><td>{relativeTime(delivery.created_at)}</td></tr>)}</tbody></table></div></Card>
     </div>}
-    {selectedId && <><button className="drawer-backdrop" aria-label="Close finding details" onClick={closeFinding} /><aside className="drawer finding-drawer" aria-label="Finding details">{detail.isLoading ? <Loading /> : detail.error ? <ErrorState error={detail.error} /> : detail.data && <><div className="drawer-head"><div className="large-node-icon"><BellRing /></div><div><small>{detail.data.severity} finding</small><h2>{detail.data.title}</h2><Badge tone={detail.data.status === "open" ? "warning" : detail.data.status === "resolved" ? "success" : "neutral"}>{detail.data.status}</Badge></div><button className="icon-button" aria-label="Close" onClick={closeFinding}><X /></button></div><div className="drawer-body">
+    {selectedId && <><div className="drawer-backdrop" aria-hidden="true" onClick={closeFinding} /><aside ref={findingDialogRef} className="drawer finding-drawer" role="dialog" aria-modal="true" aria-label="Finding details">{detail.isLoading ? <Loading /> : detail.error ? <ErrorState error={detail.error} /> : detail.data && <><div className="drawer-head"><div className="large-node-icon"><BellRing /></div><div><small>{detail.data.severity} finding</small><h2>{detail.data.title}</h2><Badge tone={detail.data.status === "open" ? "warning" : detail.data.status === "resolved" ? "success" : "neutral"}>{detail.data.status}</Badge></div><button className="icon-button" aria-label="Close" onClick={closeFinding}><X /></button></div><div className="drawer-body">
       <section className="detail-group"><h3>Summary</h3><p>{detail.data.summary}</p><div className="detail-row"><span>Subject</span><strong>{detail.data.subject_display}</strong></div><div className="detail-row"><span>Source</span><strong>{detail.data.source.replaceAll("_", " ")}</strong></div><div className="detail-row"><span>First / last seen</span><strong>{relativeTime(detail.data.first_seen)} / {relativeTime(detail.data.last_seen)}</strong></div>{detail.data.stale && <div className="notice-bar warning"><Clock3 /><span>The latest source evaluation was incomplete; this finding was retained as stale.</span></div>}</section>
       <section className="detail-group"><h3>Remediation</h3><p>{detail.data.remediation}</p>{detail.data.link_path && <Link to={detail.data.link_path}>Open related record <ChevronRight /></Link>}</section>
       <section className="detail-group"><h3>Safe evidence</h3><pre className="evidence-block">{JSON.stringify(detail.data.evidence, null, 2)}</pre></section>
@@ -635,7 +647,7 @@ export function AccessGovernance() {
         <select aria-label="Credential type" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setGovernanceFilter("credential_type", event.target.value); }}><option value="">All types</option><option value="auth_key">Auth keys</option><option value="api_access_token">API access tokens</option><option value="oauth_credential">OAuth credentials</option><option value="federated_credential">Federated credentials</option></select>
         <select aria-label="Credential status" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setGovernanceFilter("status", event.target.value); }}><option value="">All statuses</option><option value="active">Active</option><option value="expired">Expired</option><option value="revoked">Revoked</option><option value="stale">Stale</option><option value="inactive">Inactive</option></select>
       </div>
-      <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Credential</th><th>Type</th><th>Status</th><th>Scopes / tags</th><th>Expires</th><th>Properties</th></tr></thead><tbody>{credentialRows.map((row) => <tr key={row.id}><td><strong>{row.description || "Unnamed credential"}</strong><small className="block"><code>{row.display_id}</code>{row.creator_id ? ` · ${row.creator_id}` : ""}</small></td><td>{row.type.replaceAll("_", " ")}</td><td><Badge tone={row.status === "active" ? "success" : row.status === "expired" || row.status === "revoked" ? "danger" : "warning"}>{row.status}</Badge></td><td><div className="tag-list">{[...row.scopes, ...row.tags].map((value) => <code key={value}>{value}</code>)}</div></td><td>{row.expires_at ? <><strong>{new Date(row.expires_at).toLocaleDateString()}</strong><small className="block">{relativeTime(row.expires_at)}</small></> : "Not reported"}</td><td><div className="tag-list">{row.reusable === true && <Badge tone="warning">reusable</Badge>}{row.ephemeral === true && <Badge>ephemeral</Badge>}{row.preapproved === true && <Badge>pre-approved</Badge>}</div></td></tr>)}</tbody></table></div>{!credentials.isLoading && !credentialRows.length && <Empty title="No credentials reported" detail={`Capability: ${capabilityStatus("credentials")}`} />}{credentials.hasNextPage && <div className="load-more"><Button variant="secondary" onClick={() => credentials.fetchNextPage()} disabled={credentials.isFetchingNextPage}>{credentials.isFetchingNextPage ? "Loading…" : "Load more"}</Button></div>}</Card>
+      <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Credential</th><th>Type</th><th>Status</th><th>Scopes / tags</th><th>Expires</th><th>Properties</th></tr></thead><tbody>{credentialRows.map((row) => <tr key={row.id}><td><strong>{row.description || "Unnamed credential"}</strong><small className="block"><code>{row.display_id}</code>{row.creator_id ? ` · ${row.creator_id}` : ""}</small></td><td>{row.type.replaceAll("_", " ")}</td><td><Badge tone={row.status === "active" ? "success" : row.status === "expired" || row.status === "revoked" ? "danger" : "warning"}>{row.status}</Badge></td><td><div className="tag-list">{[...row.scopes, ...row.tags].map((value) => <code key={value}>{value}</code>)}</div></td><td>{row.expires_at ? <><strong>{new Date(row.expires_at).toLocaleDateString()}</strong><small className="block">{relativeTime(row.expires_at)}</small></> : "Not reported"}</td><td><div className="tag-list">{row.reusable === true && <Badge tone="warning">reusable</Badge>}{row.ephemeral === true && <Badge>ephemeral</Badge>}{row.preapproved === true && <Badge>pre-approved</Badge>}</div></td></tr>)}</tbody></table></div>{!credentials.isLoading && !credentialRows.length && <Empty title="No credentials reported" detail={`Capability: ${capabilityStatus("credentials")}`} />}{credentials.hasNextPage && <div className="load-more"><Button variant="secondary" onClick={() => credentials.fetchNextPage()} disabled={credentials.isFetchingNextPage}>{credentials.isFetchingNextPage ? "Loading…" : "Load more"}</Button></div>}</Card>
     </>}
     {tab === "invites" && <GovernanceInvites rows={invites.data?.items ?? []} status={capabilityStatus("invites")} />}
     {tab === "contacts" && <GovernanceContacts rows={contacts.data?.items ?? []} status={capabilityStatus("contacts")} />}
@@ -645,13 +657,13 @@ export function AccessGovernance() {
 }
 
 function GovernanceInvites({ rows, status }: { rows: GovernanceInvite[]; status: string }) {
-  return <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Recipient</th><th>Device</th><th>Inviter</th><th>Status</th><th>Created</th><th>Expires</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.recipient || "Not reported"}</td><td><Link to={`/devices?device=${encodeURIComponent(row.device_id)}`}>{row.device_name}</Link></td><td>{row.inviter_name || "Not reported"}</td><td><Badge tone={row.status === "pending" ? "warning" : "neutral"}>{row.status}</Badge>{row.stale && <small className="block">stale snapshot</small>}</td><td>{row.created_at ? relativeTime(row.created_at) : "Not reported"}</td><td>{row.expires_at ? new Date(row.expires_at).toLocaleDateString() : "Not reported"}</td></tr>)}</tbody></table></div>{!rows.length && <Empty title="No device invites" detail={`Capability: ${status}`} />}</Card>;
+  return <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Recipient</th><th>Device</th><th>Inviter</th><th>Status</th><th>Created</th><th>Expires</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.recipient || "Not reported"}</td><td><Link to={`/devices?device=${encodeURIComponent(row.device_id)}`}>{row.device_name}</Link></td><td>{row.inviter_name || "Not reported"}</td><td><Badge tone={row.status === "pending" ? "warning" : "neutral"}>{row.status}</Badge>{row.stale && <small className="block">stale snapshot</small>}</td><td>{row.created_at ? relativeTime(row.created_at) : "Not reported"}</td><td>{row.expires_at ? new Date(row.expires_at).toLocaleDateString() : "Not reported"}</td></tr>)}</tbody></table></div>{!rows.length && <Empty title="No device invites" detail={`Capability: ${status}`} />}</Card>;
 }
 function GovernanceContacts({ rows, status }: { rows: GovernanceContact[]; status: string }) {
-  return <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Contact type</th><th>Value</th><th>Verification</th><th>Freshness</th></tr></thead><tbody>{rows.map((row) => <tr key={row.type}><td><strong>{row.type.replaceAll("_", " ")}</strong></td><td>{row.value || "Not reported"}</td><td><Badge tone={row.verified === true ? "success" : row.verified === false ? "warning" : "neutral"}>{row.verified === true ? "verified" : row.verified === false ? "unverified" : "not reported"}</Badge></td><td>{row.stale ? "Stale snapshot" : relativeTime(row.synced_at)}</td></tr>)}</tbody></table></div>{!rows.length && <Empty title="No contacts reported" detail={`Capability: ${status}`} />}</Card>;
+  return <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Contact type</th><th>Value</th><th>Verification</th><th>Freshness</th></tr></thead><tbody>{rows.map((row) => <tr key={row.type}><td><strong>{row.type.replaceAll("_", " ")}</strong></td><td>{row.value || "Not reported"}</td><td><Badge tone={row.verified === true ? "success" : row.verified === false ? "warning" : "neutral"}>{row.verified === true ? "verified" : row.verified === false ? "unverified" : "not reported"}</Badge></td><td>{row.stale ? "Stale snapshot" : relativeTime(row.synced_at)}</td></tr>)}</tbody></table></div>{!rows.length && <Empty title="No contacts reported" detail={`Capability: ${status}`} />}</Card>;
 }
 function GovernanceStreams({ rows, status }: { rows: GovernanceStream[]; status: string }) {
-  return <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Log type</th><th>Enabled</th><th>Status</th><th>Destination type</th><th>Sanitized destination</th><th>Freshness</th></tr></thead><tbody>{rows.map((row) => <tr key={row.log_type}><td><strong>{row.log_type}</strong></td><td><Badge tone={row.enabled === true ? "success" : "neutral"}>{row.enabled === true ? "enabled" : row.enabled === false ? "disabled" : "not reported"}</Badge></td><td>{row.status}</td><td>{row.destination_type}</td><td><code>{row.destination || "Not reported"}</code></td><td>{row.stale ? "Stale snapshot" : relativeTime(row.synced_at)}</td></tr>)}</tbody></table></div>{!rows.length && <Empty title="No log-stream configuration" detail={`Capability: ${status}`} />}</Card>;
+  return <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Log type</th><th>Enabled</th><th>Status</th><th>Destination type</th><th>Sanitized destination</th><th>Freshness</th></tr></thead><tbody>{rows.map((row) => <tr key={row.log_type}><td><strong>{row.log_type}</strong></td><td><Badge tone={row.enabled === true ? "success" : "neutral"}>{row.enabled === true ? "enabled" : row.enabled === false ? "disabled" : "not reported"}</Badge></td><td>{row.status}</td><td>{row.destination_type}</td><td><code>{row.destination || "Not reported"}</code></td><td>{row.stale ? "Stale snapshot" : relativeTime(row.synced_at)}</td></tr>)}</tbody></table></div>{!rows.length && <Empty title="No log-stream configuration" detail={`Capability: ${status}`} />}</Card>;
 }
 
 export function SecurityPosture() {
@@ -826,7 +838,7 @@ export function SecurityPosture() {
       {devices.isLoading ? <Loading /> : devices.error ? <ErrorState error={devices.error} /> : !rows.length ? (
         <Empty title="No matching devices" detail="Adjust posture filters or check synchronization." />
       ) : (
-        <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Device</th><th>Owner</th><th>OS</th><th>Posture</th><th>Evidence</th><th>Attributes</th></tr></thead><tbody>
+        <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Device</th><th>Owner</th><th>OS</th><th>Posture</th><th>Evidence</th><th>Attributes</th></tr></thead><tbody>
           {rows.map((device) => <tr key={device.id}><td><Link to={`/devices?device=${encodeURIComponent(device.id)}`}><strong>{device.name}</strong></Link></td><td><OwnerLink device={device} /></td><td>{device.os}</td><td><PostureBadge value={device.posture?.status ?? "incomplete_data"} /></td><td>{device.posture?.stale ? "Stale" : relativeTime(device.posture?.checked_at ?? null)}</td><td>{device.posture?.attributes.length ?? 0}</td></tr>)}
         </tbody></table></div></Card>
       )}
@@ -840,7 +852,7 @@ function PostureBadge({ value }: { value: string }) {
   return <Badge tone={tone}>{value.replaceAll("_", " ")}</Badge>;
 }
 
-export function Devices({ role = "" }: { role?: string }) {
+export function Devices({ role = "", user }: { role?: string; user: CurrentUser }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedDevice = searchParams.get("device");
   const [search, setSearch] = useState(searchParams.get("search") ?? "");
@@ -1066,7 +1078,7 @@ export function Devices({ role = "" }: { role?: string }) {
         </>
       )}
       {selected && (
-        <NodeDrawer device={selected} close={closeDevice} />
+        <NodeDrawer device={selected} close={closeDevice} user={user} />
       )}
     </div>
   );
@@ -1082,7 +1094,7 @@ export function DeviceTable({
 }) {
   return (
     <Card className="table-card">
-      <div className="table-scroll">
+      <div className="table-scroll" tabIndex={0}>
         <table>
           <thead>
             <tr>
@@ -1212,7 +1224,7 @@ function KeyExpiryCell({ value, disabled }: { value: string | null; disabled: bo
   return <><span>{date}</span><small className="block">Beyond 14 days</small></>;
 }
 
-export function Topology() {
+export function Topology({ user }: { user: CurrentUser }) {
   const { hours, range, setRange } = useTimeRange();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selected, setSelected] = useState<Device | ServiceSummary | null>(null);
@@ -1220,14 +1232,16 @@ export function Topology() {
   const [showObserved, setShowObserved] = useState(searchParams.get("observed") === "true");
   const [layout, setLayout] = useState(searchParams.get("layout") ?? "cose");
   const [search, setSearch] = useState(searchParams.get("search") ?? "");
+  const [mode, setMode] = useState<"graph" | "table">(searchParams.get("mode") === "table" ? "table" : "graph");
   const topologyViewState = useMemo(() => ({
-    range, layout, search, observed: showObserved, permitted: showPolicy,
-  }), [layout, range, search, showObserved, showPolicy]);
+    range, layout, search, observed: showObserved, permitted: showPolicy, mode,
+  }), [layout, mode, range, search, showObserved, showPolicy]);
   const applyTopologyView = useCallback((state: Record<string, unknown>) => {
     const nextRange = String(state.range ?? "24h") as "1h" | "24h" | "7d" | "30d";
     const nextLayout = String(state.layout ?? "cose");
     const nextSearch = String(state.search ?? "");
-    setRange(nextRange); setLayout(nextLayout); setSearch(nextSearch);
+    const nextMode = state.mode === "table" ? "table" : "graph";
+    setRange(nextRange); setLayout(nextLayout); setSearch(nextSearch); setMode(nextMode);
     setShowObserved(Boolean(state.observed)); setShowPolicy(Boolean(state.permitted));
     setSelected(null);
     setSearchParams((current) => {
@@ -1236,17 +1250,21 @@ export function Topology() {
       if (nextSearch) next.set("search", nextSearch); else next.delete("search");
       if (state.observed) next.set("observed", "true"); else next.delete("observed");
       if (state.permitted) next.set("permitted", "true"); else next.delete("permitted");
+      if (nextMode === "table") next.set("mode", "table"); else next.delete("mode");
       next.delete("node");
       return next;
     });
   }, [setRange, setSearchParams]);
-  const topologyHasExplicitState = ["range", "layout", "search", "observed", "permitted"].some((key) => searchParams.has(key));
+  const topologyHasExplicitState = ["range", "layout", "search", "observed", "permitted", "mode"].some((key) => searchParams.has(key));
   const query = useQuery({
     queryKey: ["topology", hours],
     queryFn: () => request<TopologyData>(`/topology?hours=${hours}`),
   });
   const container = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
+  const filteredNodes = useMemo(() => query.data?.nodes.filter((node) => node.name.toLowerCase().includes(search.toLowerCase())) ?? [], [query.data, search]);
+  const visibleNodeIds = useMemo(() => new Set(filteredNodes.map((node) => node.id)), [filteredNodes]);
+  const visibleEdges = useMemo(() => query.data?.edges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target) && (edge.kind === "hosting" || (edge.kind === "observed" && showObserved) || (edge.kind === "permitted" && showPolicy))) ?? [], [query.data, showObserved, showPolicy, visibleNodeIds]);
   useEffect(() => {
     const requestedNode = new URLSearchParams(window.location.search).get(
       "node",
@@ -1256,13 +1274,9 @@ export function Topology() {
     if (device) setSelected(device);
   }, [query.data]);
   useEffect(() => {
-    if (!container.current || !query.data) return;
-    const filtered = query.data.nodes.filter((n) =>
-      n.name.toLowerCase().includes(search.toLowerCase()),
-    );
-    const ids = new Set(filtered.map((n) => n.id));
+    if (!container.current || !query.data || mode !== "graph") return;
     const elements: any[] = [
-      ...filtered.map((n) => ({
+      ...filteredNodes.map((n) => ({
         data: {
           id: n.id,
           label: n.name.split(".")[0],
@@ -1271,15 +1285,7 @@ export function Topology() {
           device: n,
         },
       })),
-      ...query.data.edges
-        .filter(
-          (e) =>
-            ids.has(e.source) &&
-            ids.has(e.target) &&
-            (e.kind === "hosting" ||
-              (e.kind === "observed" && showObserved) ||
-              (e.kind === "permitted" && showPolicy)),
-        )
+      ...visibleEdges
         .map((e) => ({ data: { ...e, id: e.id } })),
     ];
     const cy = cytoscape({
@@ -1364,7 +1370,7 @@ export function Topology() {
     cy.on("tap", "node", (e) => setSelected(e.target.data("device") as Device | ServiceSummary));
     cyRef.current = cy;
     return () => cy.destroy();
-  }, [query.data, showPolicy, showObserved, layout, search]);
+  }, [filteredNodes, layout, mode, query.data, visibleEdges]);
   if (query.isLoading) return <Loading />;
   if (query.error) return <ErrorState error={query.error} />;
   return (
@@ -1375,7 +1381,7 @@ export function Topology() {
           title="Topology"
           description="Observed traffic and current policy are separate layers."
         />
-        <SavedViews page="topology" state={topologyViewState} builtIn={{ range: "24h", layout: "cose", search: "", observed: false, permitted: false }} apply={applyTopologyView} hasExplicitState={topologyHasExplicitState} />
+        <SavedViews page="topology" state={topologyViewState} builtIn={{ range: "24h", layout: "cose", search: "", observed: false, permitted: false, mode: "graph" }} apply={applyTopologyView} hasExplicitState={topologyHasExplicitState} />
         <div className="topology-tools">
           <label className="search-field">
             <Search />
@@ -1385,7 +1391,7 @@ export function Topology() {
               onChange={(e) => setSearch(e.target.value)}
             />
           </label>
-          <select value={layout} onChange={(e) => setLayout(e.target.value)}>
+          <select aria-label="Topology layout" value={layout} onChange={(e) => setLayout(e.target.value)}>
             <option value="cose">Force-directed</option>
             <option value="breadthfirst">Hierarchical</option>
             <option value="circle">Grouped circle</option>
@@ -1399,6 +1405,10 @@ export function Topology() {
             <span />
             Observed
           </button>
+          <div className="view-switch" role="group" aria-label="Topology presentation">
+            <button aria-pressed={mode === "graph"} className={mode === "graph" ? "active" : ""} onClick={() => { setMode("graph"); setSearchParams((current) => { const next = new URLSearchParams(current); next.delete("mode"); return next; }); }}>Graph</button>
+            <button aria-pressed={mode === "table"} className={mode === "table" ? "active" : ""} onClick={() => { setMode("table"); setSearchParams((current) => { const next = new URLSearchParams(current); next.set("mode", "table"); return next; }); }}>Table</button>
+          </div>
           <button
             className={`layer-toggle policy ${showPolicy ? "on" : ""}`}
             onClick={() => setShowPolicy(!showPolicy)}
@@ -1423,7 +1433,8 @@ export function Topology() {
         </div>
       </div>
       <div className="graph-wrap">
-        <div className="graph-canvas" ref={container} />
+        <div className="sr-only" aria-live="polite">{filteredNodes.length} nodes and {visibleEdges.length} visible relationships. {selected ? `${selected.name} selected.` : ""}</div>
+        {mode === "graph" ? <div className="graph-canvas" ref={container} role="img" aria-label={`Network topology graph with ${filteredNodes.length} nodes and ${visibleEdges.length} visible relationships`} /> : <TopologyTable nodes={filteredNodes} edges={visibleEdges} select={setSelected} />}
         <div className="graph-legend">
           <strong>Legend</strong>
           <span>
@@ -1444,7 +1455,7 @@ export function Topology() {
           "kind" in selected && selected.kind === "service" ? (
             <ServiceDrawer service={selected} close={() => setSelected(null)} />
           ) : (
-            <NodeDrawer device={selected as Device} close={() => setSelected(null)} />
+            <NodeDrawer device={selected as Device} close={() => setSelected(null)} user={user} />
           )
         )}
       </div>
@@ -1452,7 +1463,16 @@ export function Topology() {
   );
 }
 
-function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
+function TopologyTable({ nodes, edges, select }: { nodes: Array<Device | ServiceSummary>; edges: TopologyData["edges"]; select: (node: Device | ServiceSummary) => void }) {
+  const names = new Map(nodes.map((node) => [node.id, node.name]));
+  return <div className="topology-table" aria-label="Topology table alternative">
+    <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><caption className="sr-only">Filtered topology nodes</caption><thead><tr><th>Node</th><th>Kind / role</th><th>Status</th><th>Addresses</th></tr></thead><tbody>{nodes.map((node) => <tr key={node.id}><td><button className="text-link" onClick={() => select(node)}>{node.name}</button></td><td>{("kind" in node && node.kind === "service") ? "Service" : (node as Device).primary_role.replaceAll("_", " ")}</td><td>{("kind" in node && node.kind === "service") ? node.status : <Status online={(node as Device).online} />}</td><td>{node.addresses.join(", ") || "Not reported"}</td></tr>)}</tbody></table></div></Card>
+    <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><caption className="sr-only">Visible topology relationships</caption><thead><tr><th>Source</th><th>Destination</th><th>Layer</th><th>Evidence</th></tr></thead><tbody>{edges.map((edge) => <tr key={edge.id}><td>{names.get(edge.source) ?? edge.source}</td><td>{names.get(edge.target) ?? edge.target}</td><td><Badge>{edge.kind}</Badge></td><td>{edge.reported_bytes !== undefined ? formatBytes(edge.reported_bytes) : edge.ports?.join(", ") || edge.status || "—"}</td></tr>)}</tbody></table></div></Card>
+  </div>;
+}
+
+function NodeDrawer({ device, close, user }: { device: Device; close: () => void; user: CurrentUser }) {
+  const { hours, range } = useTimeRange();
   const [addressHours, setAddressHours] = useState<24 | 168 | 720>(168);
   const detail = useQuery({
     queryKey: ["device", device.id, addressHours],
@@ -1464,17 +1484,24 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
   });
   const d = detail.data ?? device;
   const [tab, setTab] = useState("overview");
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [close]);
+  const access = useQuery({
+    queryKey: ["device-access", d.id, hours],
+    queryFn: () => request<{ items: DeviceAccessRelationship[]; notice: string; policy_retrieved_at: string | null }>(`/devices/${d.id}/access?hours=${hours}`),
+    enabled: tab === "access",
+  });
+  const history = useInfiniteQuery({
+    queryKey: ["device-history", d.id],
+    queryFn: ({ pageParam }) => request<Page<DeviceHistoryEvent>>(`/devices/${d.id}/history${pageParam ? `?cursor=${encodeURIComponent(pageParam)}` : ""}`),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    enabled: tab === "history",
+  });
+  const dialogRef = useDialogFocus<HTMLDivElement>(close);
   return (
     <>
       <div className="drawer-backdrop" aria-hidden="true" onClick={close} />
-      <aside
+      <div
+        ref={dialogRef}
         className="drawer"
         role="dialog"
         aria-modal="true"
@@ -1548,6 +1575,7 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
                 </div>
               )}
             </DetailGroup>
+            <MetadataEditor device={d} administrator={user.role === "administrator"} />
           </>
         ) : tab === "networking" ? (
           <>
@@ -1574,30 +1602,27 @@ function NodeDrawer({ device, close }: { device: Device; close: () => void }) {
               )}
             </DetailGroup>
             <ConnectivityView connectivity={d.connectivity} />
+            <TelemetrySnapshotView telemetry={d.telemetry} />
           </>
         ) : tab === "posture" ? (
           <DevicePostureView posture={d.posture} />
         ) : tab === "access" ? (
-          <AccessSummary />
+          access.isLoading ? <Loading /> : access.error ? <ErrorState error={access.error} /> : <AccessSummary data={access.data!} />
         ) : tab === "flows" ? (
           <FlowSummary flows={(d as any).flows ?? []} />
         ) : (
-          <Empty
-            title="No historical changes"
-            detail="History begins when TailView first synchronizes this device."
-            icon={<Clock3 />}
-          />
+          history.isLoading ? <Loading /> : history.error ? <ErrorState error={history.error} /> : <HistorySummary events={history.data?.pages.flatMap((page) => page.items) ?? []} loadMore={history.hasNextPage ? () => void history.fetchNextPage() : undefined} />
         )}
       </div>
       <div className="drawer-foot">
-        <a className="button secondary" href="/flows">
+        <a className="button secondary" href={`/flows?range=${range}&source=${encodeURIComponent(d.id)}`}>
           <List /> Open flows
         </a>
         <a className="button primary" href={`/topology?node=${d.id}`}>
           <Network /> Show in topology
         </a>
       </div>
-      </aside>
+      </div>
     </>
   );
 }
@@ -1856,41 +1881,132 @@ function AddressEmpty({ title, detail }: { title: string; detail: string }) {
     </div>
   );
 }
-function AccessSummary() {
+function MetadataEditor({ device, administrator }: { device: Device; administrator: boolean }) {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const metadata = device.metadata;
+  const initial = useMemo(() => ({
+    display_name: metadata?.display_name ?? "",
+    description: metadata?.description ?? "",
+    environment: metadata?.environment ?? "",
+    location: metadata?.location ?? "",
+    criticality: metadata?.criticality ?? "",
+    icon: metadata?.icon ?? "",
+    functional_groups: (metadata?.functional_groups ?? []).join(", "),
+    custom_roles: (metadata?.custom_roles ?? []).join(", "),
+    primary_role_override: metadata?.primary_role_override ?? "",
+    default_map_visible: metadata?.default_map_visible ?? true,
+  }), [metadata]);
+  const [form, setForm] = useState(initial);
+  useEffect(() => { if (!editing) setForm(initial); }, [editing, initial]);
+  const mutation = useMutation({
+    mutationFn: async () => {
+      if ((metadata?.default_map_visible ?? true) && !form.default_map_visible && !window.confirm("Hide this device from the default topology map? It remains available in inventory and explicit views.")) return null;
+      return request(`/devices/${device.id}/metadata`, {
+        method: "PUT",
+        body: JSON.stringify({
+          ...form,
+          display_name: form.display_name || null,
+          description: form.description || null,
+          environment: form.environment || null,
+          location: form.location || null,
+          criticality: form.criticality || null,
+          icon: form.icon || null,
+          primary_role_override: form.primary_role_override || null,
+          functional_groups: form.functional_groups.split(",").map((value) => value.trim()).filter(Boolean),
+          custom_roles: form.custom_roles.split(",").map((value) => value.trim()).filter(Boolean),
+          expected_revision: metadata?.revision,
+        }),
+      });
+    },
+    onSuccess: async (result) => {
+      if (!result) return;
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["device", device.id] }),
+        queryClient.invalidateQueries({ queryKey: ["devices"] }),
+        queryClient.invalidateQueries({ queryKey: ["topology"] }),
+      ]);
+      setEditing(false);
+    },
+  });
+  return <DetailGroup title="TailView local metadata">
+    <div className="metadata-heading"><p className="muted">Local presentation only. API-derived identity and classification remain unchanged.</p>{administrator && !editing && <Button variant="secondary" onClick={() => setEditing(true)}>Edit metadata</Button>}</div>
+    {!editing ? <>
+      <Detail label="Display name" value={metadata?.display_name || "Not overridden"} />
+      <Detail label="Description" value={metadata?.description || "Not set"} />
+      <Detail label="Environment" value={metadata?.environment || "Not set"} />
+      <Detail label="Location" value={metadata?.location || "Not set"} />
+      <Detail label="Criticality" value={metadata?.criticality || "Not set"} />
+      <Detail label="Functional groups" value={(metadata?.functional_groups ?? []).join(", ") || "Not set"} />
+      <Detail label="Custom roles" value={(metadata?.custom_roles ?? []).join(", ") || "Not set"} />
+      <Detail label="Default map" value={(metadata?.default_map_visible ?? true) ? "Visible" : "Hidden"} />
+    </> : <form className="metadata-form" onSubmit={(event) => { event.preventDefault(); mutation.mutate(); }}>
+      <label>Display name<input maxLength={255} value={form.display_name} onChange={(event) => setForm({ ...form, display_name: event.target.value })} /></label>
+      <label>Description<textarea maxLength={2000} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
+      <div className="metadata-grid">
+        <label>Environment<input maxLength={64} value={form.environment} onChange={(event) => setForm({ ...form, environment: event.target.value })} /></label>
+        <label>Location<input maxLength={128} value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></label>
+        <label>Criticality<select value={form.criticality} onChange={(event) => setForm({ ...form, criticality: event.target.value })}><option value="">Not set</option>{["low", "medium", "high", "critical"].map((value) => <option key={value}>{value}</option>)}</select></label>
+        <label>Icon<input maxLength={64} value={form.icon} onChange={(event) => setForm({ ...form, icon: event.target.value })} /></label>
+      </div>
+      <label>Functional groups<input value={form.functional_groups} placeholder="production, finance" onChange={(event) => setForm({ ...form, functional_groups: event.target.value })} /><small>Comma-separated TailView-local groups.</small></label>
+      <label>Custom display roles<input value={form.custom_roles} placeholder="database, monitoring" onChange={(event) => setForm({ ...form, custom_roles: event.target.value })} /></label>
+      <label>Primary display role<input maxLength={64} value={form.primary_role_override} placeholder={device.api_primary_role ?? device.primary_role} onChange={(event) => setForm({ ...form, primary_role_override: event.target.value })} /></label>
+      <label className="check-row"><input type="checkbox" checked={form.default_map_visible} onChange={(event) => setForm({ ...form, default_map_visible: event.target.checked })} />Visible on the default topology map</label>
+      {mutation.error && <ErrorState error={mutation.error} />}
+      <div className="card-actions"><Button variant="ghost" type="button" onClick={() => { setForm({ ...initial, display_name: "", description: "", environment: "", location: "", criticality: "", icon: "", functional_groups: "", custom_roles: "", primary_role_override: "", default_map_visible: true }); }}>Reset fields</Button><Button variant="secondary" type="button" onClick={() => setEditing(false)}>Cancel</Button><Button disabled={mutation.isPending}>{mutation.isPending ? "Saving…" : "Save metadata"}</Button></div>
+    </form>}
+  </DetailGroup>;
+}
+
+function TelemetrySnapshotView({ telemetry }: { telemetry?: TelemetryObservation | null }) {
+  return <DetailGroup title="Local collector telemetry">
+    {!telemetry ? <p className="muted">No local collector observation maps to this device.</p> : <>
+      <div className={`notice-bar ${telemetry.stale ? "warning" : ""}`}>{telemetry.stale ? <AlertTriangle /> : <CircleDot />}<span>{telemetry.notice} Observed {relativeTime(telemetry.observed_at)}.</span></div>
+      <Detail label="UDP" value={telemetry.udp === null ? "Not reported" : telemetry.udp ? "Available" : "Unavailable"} />
+      <Detail label="IPv4 / IPv6" value={`${telemetry.ipv4 === null ? "not reported" : telemetry.ipv4 ? "yes" : "no"} / ${telemetry.ipv6 === null ? "not reported" : telemetry.ipv6 ? "yes" : "no"}`} />
+      <Detail label="Preferred DERP" value={telemetry.preferred_derp || "Not reported"} />
+      <Detail label="Client version" value={telemetry.client_version || "Not reported"} />
+      <Link className="text-link" to={`/telemetry?collector=${encodeURIComponent(telemetry.collector_device_id || telemetry.collector_node_id || "")}`}>Open telemetry history <ChevronRight /></Link>
+    </>}
+  </DetailGroup>;
+}
+
+function AccessSummary({ data }: { data: { items: DeviceAccessRelationship[]; notice: string; policy_retrieved_at: string | null } }) {
+  const tone = (state: DeviceAccessRelationship["state"]) => state === "both" || state === "permitted" ? "success" : state === "evaluation_incomplete" ? "warning" : "neutral";
   return (
     <>
       <div className="reliability">
         <GitCompareArrows />
         <div>
           <strong>Policy relationship</strong>
-          <p>
-            Current allow rules are evaluated independently from historical
-            observations.
-          </p>
+          <p>{data.notice}</p>
         </div>
       </div>
-      <DetailGroup title="Evaluation states">
-        <div className="access-row">
-          <span className="access-icon allow">
-            <CheckCircle2 />
-          </span>
-          <div>
-            <strong>Permitted by current policy</strong>
-            <p>Matching additive allow rule.</p>
-          </div>
-        </div>
-        <div className="access-row">
-          <span className="access-icon incomplete">
-            <AlertTriangle />
-          </span>
-          <div>
-            <strong>Evaluation incomplete</strong>
-            <p>Unknown selectors are never guessed.</p>
-          </div>
-        </div>
+      <DetailGroup title="Inbound and outbound relationships">
+        {!data.items.length ? <p className="muted">No current evaluated relationships or observed device pairs in this range.</p> : data.items.map((item) => <div className="access-relationship" key={`${item.direction}:${item.source.id}:${item.destination.id}`}>
+          <div><Badge>{item.direction}</Badge><Badge tone={tone(item.state)}>{item.state.replaceAll("_", " ")}</Badge></div>
+          <strong><EntityLink label={item.source.label} deviceId={item.source.id} /> → <EntityLink label={item.destination.label} deviceId={item.destination.id} /></strong>
+          {item.observation && <small>{formatBytes(item.observation.reported_bytes)} reported · last {relativeTime(item.observation.last_observed_at)}</small>}
+          {item.rules.map((rule) => <div className="access-rule" key={rule.id}><code>{rule.policy_path}</code><small>{Array.isArray(rule.protocol) ? rule.protocol.join(", ") : rule.protocol} · {rule.ports.join(", ") || "ports not reported"}</small>{rule.posture.length > 0 && <small>Posture: {rule.posture.join(", ")}</small>}<small>Expansion: {[...rule.source_path, ...rule.destination_path].join(" → ") || "direct selector"} · {rule.status.replaceAll("_", " ")}</small></div>)}
+        </div>)}
       </DetailGroup>
     </>
   );
+}
+
+function HistorySummary({ events, loadMore }: { events: DeviceHistoryEvent[]; loadMore?: () => void }) {
+  return <>
+    <div className="notice-bar"><Clock3 /><span>History begins after TailView deployed device-change collection; earlier changes cannot be reconstructed.</span></div>
+    <DetailGroup title="Device changes">
+      {!events.length ? <p className="muted">No changes have been recorded since history collection began.</p> : events.map((event) => <div className="history-event" key={event.id}>
+        <div><strong>{event.event_type.replaceAll("_", " ")}</strong><Badge>{event.source.replaceAll("_", " ")}</Badge></div>
+        <small>{new Date(event.occurred_at).toLocaleString()} · {event.changed_fields.join(", ")}</small>
+        <details><summary>Changed values</summary><pre>{JSON.stringify({ before: event.before, after: event.after }, null, 2)}</pre></details>
+      </div>)}
+      {loadMore && <Button variant="secondary" onClick={loadMore}>Load more history</Button>}
+    </DetailGroup>
+  </>;
 }
 function FlowSummary({ flows }: { flows: any[] }) {
   return (
@@ -2146,7 +2262,7 @@ export function Flows() {
       ) : (
         <>
           <Card className="table-card">
-            <div className="table-scroll">
+            <div className="table-scroll" tabIndex={0}>
               <table>
               <thead>
                 <tr>
@@ -2686,7 +2802,7 @@ export function Services() {
         <input aria-label="Service host filter" value={host} placeholder="Filter hosting device…" onChange={(event) => { setHost(event.target.value); updateFilter("host", event.target.value); }} />
       </div>
       {query.isLoading ? <Loading /> : query.error ? <ErrorState error={query.error} /> : !rows.length ? <Empty title="No Services available" detail="Synchronize the Services source or confirm that this tailnet uses Tailscale Services." /> : <>
-        <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Service</th><th>Status</th><th>Addresses</th><th>Ports</th><th>Hosts</th><th>Provenance</th></tr></thead><tbody>
+        <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Service</th><th>Status</th><th>Addresses</th><th>Ports</th><th>Hosts</th><th>Provenance</th></tr></thead><tbody>
           {rows.map((service) => <tr key={service.id} className="clickable-row" onClick={() => setSelected(service)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") setSelected(service); }}><td><strong>{service.name}</strong>{service.comment && <small className="block">{service.comment}</small>}</td><td><Badge tone={service.status === "connected" ? "success" : service.status === "offline" ? "danger" : "warning"}>{service.status.replaceAll("_", " ")}</Badge>{service.stale && <small className="block">Last-good / stale</small>}</td><td>{service.addresses?.join(", ") || "Not reported"}</td><td>{service.ports?.join(", ") || "Not reported"}</td><td>{service.host_count ?? 0}</td><td>{service.source}</td></tr>)}
         </tbody></table></div></Card>
         {query.hasNextPage && <Button variant="secondary" onClick={() => void query.fetchNextPage()} disabled={query.isFetchingNextPage}>{query.isFetchingNextPage ? "Loading…" : "Load more Services"}</Button>}
@@ -2697,10 +2813,11 @@ export function Services() {
 }
 
 function ServiceDrawer({ service, close }: { service: ServiceSummary; close: () => void }) {
+  const dialogRef = useDialogFocus<HTMLDivElement>(close);
   const serviceId = service.service_id ?? service.id.replace(/^service:/, "");
   const detail = useQuery({ queryKey: ["service", serviceId], queryFn: () => request<ServiceDetail>(`/services/${encodeURIComponent(serviceId)}`), enabled: service.status !== "policy_reference_only" });
   const value = detail.data;
-  return <><div className="drawer-backdrop" aria-hidden="true" onClick={close} /><aside className="drawer" role="dialog" aria-modal="true" aria-label={`Service details for ${service.name}`}>
+  return <><div className="drawer-backdrop" aria-hidden="true" onClick={close} /><div ref={dialogRef} className="drawer" role="dialog" aria-modal="true" aria-label={`Service details for ${service.name}`}>
     <div className="drawer-head"><div className="large-node-icon"><GitCompareArrows /></div><div><span className="eyebrow">TAILSCALE SERVICE</span><h2>{service.name}</h2><Badge tone={(value?.status ?? service.status) === "connected" ? "success" : "warning"}>{value?.status ?? service.status}</Badge></div><button className="icon-button" onClick={close} aria-label="Close Service details"><X /></button></div>
     <div className="drawer-body">{detail.isLoading ? <Loading /> : detail.error ? <ErrorState error={detail.error} /> : service.status === "policy_reference_only" ? <Empty title="Policy reference only" detail="No matching Service inventory object has been synchronized." /> : value && <>
       {value.stale && <div className="notice-bar warning"><AlertTriangle /><span>This is the last successful snapshot; the current source is unavailable.</span></div>}
@@ -2709,7 +2826,7 @@ function ServiceDrawer({ service, close }: { service: ServiceSummary; close: () 
       <DetailGroup title="Endpoints">{value.endpoints.length ? value.endpoints.map((endpoint) => <Detail key={endpoint.id} label={endpoint.type} value={`${endpoint.protocol}:${endpoint.port ?? "not reported"}`} />) : <p>No endpoints were reported.</p>}</DetailGroup>
       <DetailGroup title="Policy references"><Detail label="References" value={value.policy_references.length ? value.policy_references.map((reference) => `${reference.section}[${reference.rule_index}]`).join(", ") : "None in current normalized policy"} /><Detail label="Provenance" value={value.provenance} /></DetailGroup>
     </>}</div>
-  </aside></>;
+  </div></>;
 }
 
 export function InventoryPage({ kind }: { kind: string }) {
@@ -2781,7 +2898,7 @@ function GenericTable({
     .slice(0, 8);
   return (
     <Card className="table-card">
-      <div className="table-scroll">
+      <div className="table-scroll" tabIndex={0}>
         <table>
           <thead>
             <tr>
@@ -2985,6 +3102,36 @@ export function DnsSettings() {
   );
 }
 
+export function Telemetry() {
+  const { hours, range } = useTimeRange();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const collector = searchParams.get("collector") ?? "";
+  const freshness = searchParams.get("freshness") ?? "";
+  const summary = useQuery({ queryKey: ["telemetry-summary"], queryFn: () => request<{ collectors: TelemetryObservation[]; counts: { collectors: number; fresh: number; stale: number; unmapped: number }; status: string; notice: string }>("/telemetry/summary") });
+  const observations = useInfiniteQuery({
+    queryKey: ["telemetry-observations", collector, freshness, hours],
+    queryFn: ({ pageParam }) => { const params = new URLSearchParams({ hours: String(hours) }); if (collector) params.set("collector", collector); if (freshness) params.set("freshness", freshness); if (pageParam) params.set("cursor", pageParam); return request<Page<TelemetryObservation>>(`/telemetry/observations?${params}`); },
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  });
+  const setFilter = (key: string, value: string) => setSearchParams((current) => { const next = new URLSearchParams(current); if (value) next.set(key, value); else next.delete(key); return next; });
+  if (summary.isLoading) return <Loading />;
+  if (summary.error) return <ErrorState error={summary.error} />;
+  const data = summary.data!;
+  const rows = observations.data?.pages.flatMap((page) => page.items) ?? [];
+  return <div className="page telemetry-page">
+    <PageHead eyebrow="OPTIONAL LOCAL TELEMETRY" title="Telemetry" description="Point-in-time status and netcheck snapshots from explicitly enabled collectors." actions={<Badge tone={data.counts.stale ? "warning" : data.counts.fresh ? "success" : "neutral"}>{data.status.replaceAll("_", " ")}</Badge>} />
+    <div className="notice-bar warning"><AlertTriangle /><span>{data.notice} No active scanning or diagnostic pings are performed.</span></div>
+    <div className="metric-grid compact">{[["Collectors", data.counts.collectors], ["Fresh", data.counts.fresh], ["Stale", data.counts.stale], ["Unmapped", data.counts.unmapped]].map(([label, value]) => <Card key={label}><small>{label}</small><strong>{value}</strong></Card>)}</div>
+    <div className="toolbar"><select aria-label="Telemetry collector" value={collector} onChange={(event) => setFilter("collector", event.target.value)}><option value="">All collectors</option>{data.collectors.map((item) => <option key={item.id} value={item.collector_device_id || item.collector_node_id || item.id}>{item.collector_name || item.collector_node_id || "Unmapped collector"}</option>)}</select><select aria-label="Telemetry freshness" value={freshness} onChange={(event) => setFilter("freshness", event.target.value)}><option value="">All freshness states</option><option value="fresh">Fresh</option><option value="stale">Stale</option></select><span className="muted">Range: {range}</span></div>
+    {observations.isLoading ? <Loading /> : observations.error ? <ErrorState error={observations.error} /> : !rows.length ? <Empty title="No telemetry observations" detail="Enable the telemetry Compose profile and wait for a signed collector snapshot, or adjust the selected filters." /> : <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Collector</th><th>Observed</th><th>Connectivity</th><th>Preferred DERP</th><th>DERP latency</th><th>Provenance</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.collector_device_id ? <Link to={`/devices?device=${encodeURIComponent(row.collector_device_id)}`}>{row.collector_name}</Link> : row.collector_name || row.collector_node_id || "Unmapped"}<small className="block"><code>{row.collector_node_id || "ID not reported"}</code></small></td><td>{relativeTime(row.observed_at)}<small className="block">{new Date(row.observed_at).toLocaleString()}</small>{row.stale && <Badge tone="warning">stale</Badge>}</td><td>UDP {reportedBoolean(row.udp)} · IPv4 {reportedBoolean(row.ipv4)} · IPv6 {reportedBoolean(row.ipv6)}</td><td>{row.preferred_derp || "Not reported"}</td><td>{Object.keys(row.derp_latency).length ? Object.entries(row.derp_latency).sort((a, b) => Number(a[1]) - Number(b[1])).slice(0, 5).map(([region, latency]) => <span className="block" key={region}>{region}: {Number(latency).toFixed(1)}s</span>) : "Not reported"}</td><td><Badge>local only</Badge><small className="block">{row.scope.replaceAll("_", " ")}</small></td></tr>)}</tbody></table></div>{observations.hasNextPage && <div className="load-more"><Button variant="secondary" disabled={observations.isFetchingNextPage} onClick={() => void observations.fetchNextPage()}>{observations.isFetchingNextPage ? "Loading…" : "Load more"}</Button></div>}</Card>}
+  </div>;
+}
+
+function reportedBoolean(value: boolean | null) {
+  return value === null ? "not reported" : value ? "yes" : "no";
+}
+
 export function AccountSecurity({ user }: { user: { username: string; role: string; mfa_enabled: boolean; mfa_required: boolean } }) {
   const qc = useQueryClient();
   const sessions = useQuery({
@@ -3125,10 +3272,10 @@ export function TailViewAccess() {
       </Card>
       <Card className="settings-card full">
         <CardHead title="TailView accounts" detail="Deactivate accounts instead of deleting their audit identity." action={<input aria-label="Search TailView accounts" placeholder="Search accounts…" value={accountSearch} onChange={(e) => setAccountSearch(e.target.value)} />} />
-        {accounts.isLoading ? <Loading /> : accounts.error ? <ErrorState error={accounts.error} /> : <><div className="table-scroll"><table><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>MFA</th><th>Sessions</th><th>Last login</th><th>Actions</th></tr></thead><tbody>{accountItems.map((account) => <tr key={account.id}><td><strong>{account.display_name || account.username}</strong><small className="block">{account.username}</small>{account.must_change_password && <Badge tone="warning">Password change required</Badge>}</td><td><Badge tone={account.role === "administrator" ? "success" : "neutral"}>{account.role}</Badge></td><td><Badge tone={account.active ? "success" : "neutral"}>{account.active ? "Active" : "Inactive"}</Badge></td><td>{account.mfa_enabled ? "Enabled" : "Not enabled"}</td><td>{account.session_count}</td><td>{account.last_login_at ? relativeTime(account.last_login_at) : "Never"}</td><td><div className="table-actions"><Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}`, { method: "PATCH", body: JSON.stringify({ role: account.role === "administrator" ? "viewer" : "administrator" }) }, `Change ${account.username}'s role?`)}>Change role</Button><Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}`, { method: "PATCH", body: JSON.stringify({ active: !account.active }) }, `${account.active ? "Deactivate" : "Reactivate"} ${account.username}?`)}>{account.active ? "Deactivate" : "Reactivate"}</Button><Button className="ghost" onClick={() => resetPassword(account)}>Reset password</Button><Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}/revoke-sessions`, { method: "POST" }, `Revoke every session for ${account.username}?`)}>Revoke sessions</Button>{account.mfa_enabled && <Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}/reset-mfa`, { method: "POST" }, `Reset MFA for ${account.username}?`)}>Reset MFA</Button>}</div></td></tr>)}</tbody></table></div>{accounts.hasNextPage && <Button className="secondary" onClick={() => void accounts.fetchNextPage()}>Load more accounts</Button>}</>}
+        {accounts.isLoading ? <Loading /> : accounts.error ? <ErrorState error={accounts.error} /> : <><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>MFA</th><th>Sessions</th><th>Last login</th><th>Actions</th></tr></thead><tbody>{accountItems.map((account) => <tr key={account.id}><td><strong>{account.display_name || account.username}</strong><small className="block">{account.username}</small>{account.must_change_password && <Badge tone="warning">Password change required</Badge>}</td><td><Badge tone={account.role === "administrator" ? "success" : "neutral"}>{account.role}</Badge></td><td><Badge tone={account.active ? "success" : "neutral"}>{account.active ? "Active" : "Inactive"}</Badge></td><td>{account.mfa_enabled ? "Enabled" : "Not enabled"}</td><td>{account.session_count}</td><td>{account.last_login_at ? relativeTime(account.last_login_at) : "Never"}</td><td><div className="table-actions"><Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}`, { method: "PATCH", body: JSON.stringify({ role: account.role === "administrator" ? "viewer" : "administrator" }) }, `Change ${account.username}'s role?`)}>Change role</Button><Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}`, { method: "PATCH", body: JSON.stringify({ active: !account.active }) }, `${account.active ? "Deactivate" : "Reactivate"} ${account.username}?`)}>{account.active ? "Deactivate" : "Reactivate"}</Button><Button className="ghost" onClick={() => resetPassword(account)}>Reset password</Button><Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}/revoke-sessions`, { method: "POST" }, `Revoke every session for ${account.username}?`)}>Revoke sessions</Button>{account.mfa_enabled && <Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}/reset-mfa`, { method: "POST" }, `Reset MFA for ${account.username}?`)}>Reset MFA</Button>}</div></td></tr>)}</tbody></table></div>{accounts.hasNextPage && <Button className="secondary" onClick={() => void accounts.fetchNextPage()}>Load more accounts</Button>}</>}
       </Card>
       <Card className="settings-card full"><CardHead title="Active sessions" detail="Revocation takes effect on the next request." action={<input aria-label="Search active sessions" placeholder="Search username…" value={sessionSearch} onChange={(e) => setSessionSearch(e.target.value)} />} />{sessions.isLoading ? <Loading /> : <><div className="session-list">{sessionItems.map((session) => <div className="session-row" key={session.id}><Laptop /><div><strong>{session.username}</strong><p>{session.user_agent}</p><small>{session.last_ip} · {relativeTime(session.last_seen_at)}</small></div><Button className="ghost" onClick={() => void mutate(`/settings/app-sessions/${session.id}`, { method: "DELETE" }, `Revoke ${session.username}'s session?`)}>Revoke</Button></div>)}</div>{sessions.hasNextPage && <Button className="secondary" onClick={() => void sessions.fetchNextPage()}>Load more sessions</Button>}</>}</Card>
-      <Card className="settings-card full"><CardHead title="Local security history" detail="Immutable TailView authentication and administration events." />{events.isLoading ? <Loading /> : <div className="table-scroll"><table><thead><tr><th>Event</th><th>Result</th><th>Source</th><th>When</th><th>Correlation ID</th></tr></thead><tbody>{events.data?.items.map((event) => <tr key={event.id}><td>{event.event.replaceAll("_", " ")}</td><td><Badge tone={event.result === "success" ? "success" : "warning"}>{event.result}</Badge></td><td><code>{event.source_address}</code></td><td>{relativeTime(event.occurred_at)}</td><td><code>{event.correlation_id || "Not reported"}</code></td></tr>)}</tbody></table></div>}</Card>
+      <Card className="settings-card full"><CardHead title="Local security history" detail="Immutable TailView authentication and administration events." />{events.isLoading ? <Loading /> : <div className="table-scroll" tabIndex={0}><table><thead><tr><th>Event</th><th>Result</th><th>Source</th><th>When</th><th>Correlation ID</th></tr></thead><tbody>{events.data?.items.map((event) => <tr key={event.id}><td>{event.event.replaceAll("_", " ")}</td><td><Badge tone={event.result === "success" ? "success" : "warning"}>{event.result}</Badge></td><td><code>{event.source_address}</code></td><td>{relativeTime(event.occurred_at)}</td><td><code>{event.correlation_id || "Not reported"}</code></td></tr>)}</tbody></table></div>}</Card>
     </div>
   </div>;
 }
@@ -3194,7 +3341,7 @@ export function SettingsPage({ user }: { user: { role: string } }) {
           ) : query.error ? (
             <ErrorState error={query.error} />
           ) : (
-            <div className="table-scroll">
+            <div className="table-scroll" tabIndex={0}>
               <table>
                 <thead>
                   <tr>
@@ -3329,7 +3476,7 @@ export function Operations() {
   return <div className="page operations-page">
     <PageHead eyebrow="TAILVIEW OPERATIONS" title="Operations" description="Runtime health, scheduled work, storage, retention, and verified recovery evidence." actions={<Badge tone={value.status === "healthy" ? "success" : "warning"}>{value.status === "healthy" ? <CheckCircle2 /> : <AlertTriangle />}{value.status}</Badge>} />
     <div className="tabs" role="tablist" aria-label="Operations workspace">
-      {(["overview", "jobs", "storage", "retention", "backups"] as OperationsTab[]).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setParam("tab", item)}>{item}</button>)}
+      {(["overview", "jobs", "storage", "retention", "backups"] as OperationsTab[]).map((item) => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? "active" : ""} onClick={() => setParam("tab", item)}>{item}</button>)}
     </div>
     {tab === "overview" && <>
       <div className="metric-grid operations-metrics">
@@ -3356,11 +3503,11 @@ export function Operations() {
     </>}
     {tab === "jobs" && <>
       <div className="toolbar operations-filters"><select aria-label="Operational job" value={jobFilter} onChange={(event) => setParam("job", event.target.value)}><option value="">All jobs</option>{value.jobs.filter((job) => job.name !== "scheduler").map((job) => <option key={job.name} value={job.name}>{job.name}</option>)}</select><select aria-label="Job category" value={categoryFilter} onChange={(event) => setParam("category", event.target.value)}><option value="">All categories</option>{[...new Set(value.jobs.map((job) => job.category))].map((category) => <option key={category}>{category}</option>)}</select><select aria-label="Job status" value={statusFilter} onChange={(event) => setParam("status", event.target.value)}><option value="">All statuses</option>{["success", "failed", "partial_success", "running", "skipped", "lock_skipped", "cancelled"].map((status) => <option key={status}>{status}</option>)}</select></div>
-      {jobs.isLoading ? <Loading /> : jobs.error ? <ErrorState error={jobs.error} /> : !jobRows.length ? <Empty title="No matching executions" detail="Scheduled executions will appear after the scheduler runs." /> : <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th><th>Processed</th><th>Reference</th></tr></thead><tbody>{jobRows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong><small className="block">{row.category}</small></td><td><Badge tone={row.status === "success" ? "success" : row.status === "failed" ? "danger" : row.status === "partial_success" ? "warning" : "neutral"}>{row.status.replaceAll("_", " ")}</Badge>{row.error_class && <small className="block">{row.error_class}</small>}</td><td>{relativeTime(row.started_at)}</td><td>{row.duration_ms === null ? "Running" : `${row.duration_ms} ms`}</td><td>{row.processed}</td><td>{row.sync_job_id ? <Link to="/sync">Sync job</Link> : row.report_run_id ? <Link to={`/reports?report=${row.report_run_id}`}>Report</Link> : "—"}</td></tr>)}</tbody></table></div>{jobs.hasNextPage && <Button variant="secondary" onClick={() => void jobs.fetchNextPage()}>Load more</Button>}</Card>}
+      {jobs.isLoading ? <Loading /> : jobs.error ? <ErrorState error={jobs.error} /> : !jobRows.length ? <Empty title="No matching executions" detail="Scheduled executions will appear after the scheduler runs." /> : <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th><th>Processed</th><th>Reference</th></tr></thead><tbody>{jobRows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong><small className="block">{row.category}</small></td><td><Badge tone={row.status === "success" ? "success" : row.status === "failed" ? "danger" : row.status === "partial_success" ? "warning" : "neutral"}>{row.status.replaceAll("_", " ")}</Badge>{row.error_class && <small className="block">{row.error_class}</small>}</td><td>{relativeTime(row.started_at)}</td><td>{row.duration_ms === null ? "Running" : `${row.duration_ms} ms`}</td><td>{row.processed}</td><td>{row.sync_job_id ? <Link to="/sync">Sync job</Link> : row.report_run_id ? <Link to={`/reports?report=${row.report_run_id}`}>Report</Link> : "—"}</td></tr>)}</tbody></table></div>{jobs.hasNextPage && <Button variant="secondary" onClick={() => void jobs.fetchNextPage()}>Load more</Button>}</Card>}
     </>}
-    {tab === "storage" && (storage.isLoading ? <Loading /> : storage.error ? <ErrorState error={storage.error} /> : <div className="operations-grid"><Card><CardHead title="Managed records" detail="Counts by retained data class." />{Object.entries(storage.data?.counts ?? {}).map(([name, count]) => <div className="setting-row" key={name}><strong>{name.replaceAll("_", " ")}</strong><span>{count.toLocaleString()}</span></div>)}</Card><Card><CardHead title="PostgreSQL relations" detail="Table and index usage; host filesystem capacity is deliberately not inferred." />{!storage.data?.relations.length ? <Empty title="Relation sizes unavailable" detail="Detailed relation sizes require PostgreSQL." /> : <div className="table-scroll"><table><thead><tr><th>Relation</th><th>Total</th><th>Table</th><th>Indexes</th></tr></thead><tbody>{storage.data.relations.map((row) => <tr key={row.name}><td>{row.name}</td><td>{formatBytes(row.total_bytes)}</td><td>{formatBytes(row.table_bytes)}</td><td>{formatBytes(row.index_bytes)}</td></tr>)}</tbody></table></div>}</Card></div>)}
-    {tab === "retention" && (retention.isLoading ? <Loading /> : retention.error ? <ErrorState error={retention.error} /> : <><div className="notice-bar"><Clock3 /><span>Effective settings are environment-driven. This page previews what a cleanup would remove.</span></div>{retention.data?.raw_flow_cleanup_blocked && <div className="notice-bar warning"><AlertTriangle /><span>Raw flows remain protected because aggregate coverage does not yet reach the raw retention cutoff.</span></div>}<Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Dataset</th><th>Retention</th><th>Eligible rows</th></tr></thead><tbody>{Object.entries(retention.data?.retention_days ?? {}).map(([name, days]) => <tr key={name}><td>{name.replaceAll("_", " ")}</td><td>{days} days</td><td>{(retention.data?.eligible[name] ?? 0).toLocaleString()}</td></tr>)}</tbody></table></div><div className="card-actions"><Button variant="secondary" onClick={() => void retention.refetch()}>Refresh preview</Button><Button disabled={cleanup.isPending} onClick={() => { if (window.confirm("Delete only records currently eligible under the configured retention policy?")) cleanup.mutate(); }}>{cleanup.isPending ? "Cleaning…" : "Run cleanup"}</Button></div>{cleanup.error && <ErrorState error={cleanup.error} />}</Card></>)}
-    {tab === "backups" && (backups.isLoading ? <Loading /> : backups.error ? <ErrorState error={backups.error} /> : !backups.data?.items.length ? <Empty title="No backup drills recorded" detail="Create a dump with make backup, then run make verify-backup FILE=tailview.dump. Verification restores only to an isolated temporary PostgreSQL instance." /> : <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Backup</th><th>Status</th><th>Verified</th><th>Size</th><th>PostgreSQL</th><th>Migration</th><th>SHA-256</th></tr></thead><tbody>{backups.data.items.map((row) => <tr key={row.id}><td>{row.filename}</td><td><Badge tone={row.status === "success" ? "success" : "danger"}>{row.status}</Badge>{row.error_class && <small className="block">{row.error_class}</small>}</td><td>{relativeTime(row.verified_at)}</td><td>{formatBytes(row.size)}</td><td>{row.postgres_version || "Not reported"}</td><td><code>{row.migration_revision || "Not reported"}</code></td><td><code title={row.content_hash}>{row.content_hash.slice(0, 12)}…</code></td></tr>)}</tbody></table></div></Card>)}
+    {tab === "storage" && (storage.isLoading ? <Loading /> : storage.error ? <ErrorState error={storage.error} /> : <div className="operations-grid"><Card><CardHead title="Managed records" detail="Counts by retained data class." />{Object.entries(storage.data?.counts ?? {}).map(([name, count]) => <div className="setting-row" key={name}><strong>{name.replaceAll("_", " ")}</strong><span>{count.toLocaleString()}</span></div>)}</Card><Card><CardHead title="PostgreSQL relations" detail="Table and index usage; host filesystem capacity is deliberately not inferred." />{!storage.data?.relations.length ? <Empty title="Relation sizes unavailable" detail="Detailed relation sizes require PostgreSQL." /> : <div className="table-scroll" tabIndex={0}><table><thead><tr><th>Relation</th><th>Total</th><th>Table</th><th>Indexes</th></tr></thead><tbody>{storage.data.relations.map((row) => <tr key={row.name}><td>{row.name}</td><td>{formatBytes(row.total_bytes)}</td><td>{formatBytes(row.table_bytes)}</td><td>{formatBytes(row.index_bytes)}</td></tr>)}</tbody></table></div>}</Card></div>)}
+    {tab === "retention" && (retention.isLoading ? <Loading /> : retention.error ? <ErrorState error={retention.error} /> : <><div className="notice-bar"><Clock3 /><span>Effective settings are environment-driven. This page previews what a cleanup would remove.</span></div>{retention.data?.raw_flow_cleanup_blocked && <div className="notice-bar warning"><AlertTriangle /><span>Raw flows remain protected because aggregate coverage does not yet reach the raw retention cutoff.</span></div>}<Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Dataset</th><th>Retention</th><th>Eligible rows</th></tr></thead><tbody>{Object.entries(retention.data?.retention_days ?? {}).map(([name, days]) => <tr key={name}><td>{name.replaceAll("_", " ")}</td><td>{days} days</td><td>{(retention.data?.eligible[name] ?? 0).toLocaleString()}</td></tr>)}</tbody></table></div><div className="card-actions"><Button variant="secondary" onClick={() => void retention.refetch()}>Refresh preview</Button><Button disabled={cleanup.isPending} onClick={() => { if (window.confirm("Delete only records currently eligible under the configured retention policy?")) cleanup.mutate(); }}>{cleanup.isPending ? "Cleaning…" : "Run cleanup"}</Button></div>{cleanup.error && <ErrorState error={cleanup.error} />}</Card></>)}
+    {tab === "backups" && (backups.isLoading ? <Loading /> : backups.error ? <ErrorState error={backups.error} /> : !backups.data?.items.length ? <Empty title="No backup drills recorded" detail="Create a dump with make backup, then run make verify-backup FILE=tailview.dump. Verification restores only to an isolated temporary PostgreSQL instance." /> : <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Backup</th><th>Status</th><th>Verified</th><th>Size</th><th>PostgreSQL</th><th>Migration</th><th>SHA-256</th></tr></thead><tbody>{backups.data.items.map((row) => <tr key={row.id}><td>{row.filename}</td><td><Badge tone={row.status === "success" ? "success" : "danger"}>{row.status}</Badge>{row.error_class && <small className="block">{row.error_class}</small>}</td><td>{relativeTime(row.verified_at)}</td><td>{formatBytes(row.size)}</td><td>{row.postgres_version || "Not reported"}</td><td><code>{row.migration_revision || "Not reported"}</code></td><td><code title={row.content_hash}>{row.content_hash.slice(0, 12)}…</code></td></tr>)}</tbody></table></div></Card>)}
   </div>;
 }
 
@@ -3411,6 +3558,7 @@ export function Reports({ user }: { user: ReportsUser }) {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedId, setSelectedId] = useState(searchParams.get("report") ?? "");
+  const reportDialogRef = useDialogFocus(() => setSelectedId(""), Boolean(selectedId));
   const [statusFilter, setStatusFilter] = useState(searchParams.get("status") ?? "");
   const [scheduleFilter, setScheduleFilter] = useState(searchParams.get("schedule") ?? "");
   const [viewFilter, setViewFilter] = useState(searchParams.get("saved_view") ?? "");
@@ -3532,7 +3680,7 @@ export function Reports({ user }: { user: ReportsUser }) {
       {(summary.data.latest.trend?.length ?? 0) > 0 && <ResponsiveContainer width="100%" height={240}><AreaChart data={summary.data.latest.trend}><CartesianGrid strokeDasharray="3 3" stroke="var(--border)" /><XAxis dataKey="bucket_start" tickFormatter={(value) => new Date(value).toLocaleDateString()} /><YAxis tickFormatter={(value) => formatBytes(value)} /><Tooltip formatter={(value) => formatBytes(Number(value))} /><Area type="monotone" dataKey="reported_bytes" stroke="#5be7c4" fill="#5be7c433" /></AreaChart></ResponsiveContainer>}
       <div className="aggregate-coverage-row">{Object.entries(summary.data.aggregate_coverage).map(([granularity, coverage]) => <div key={granularity}><Badge tone={coverage.last_error ? "warning" : "success"}>{granularity}</Badge><span>{coverage.coverage_start ? `${new Date(coverage.coverage_start).toLocaleDateString()} – ${new Date(coverage.coverage_end!).toLocaleDateString()}` : "Collection not started"}</span><small>{coverage.last_success ? `Updated ${relativeTime(coverage.last_success)} · ${coverage.retention_days}d retained` : coverage.last_error || "Waiting for aggregation"}</small></div>)}</div>
     </Card>}
-    {user.role === "administrator" && <div className="tabs" role="tablist" aria-label="Report workspace"><button className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")}>Reports</button><button className={tab === "schedules" ? "active" : ""} onClick={() => setTab("schedules")}>Schedules</button></div>}
+    {user.role === "administrator" && <div className="tabs" role="tablist" aria-label="Report workspace"><button role="tab" aria-selected={tab === "reports"} className={tab === "reports" ? "active" : ""} onClick={() => setTab("reports")}>Reports</button><button role="tab" aria-selected={tab === "schedules"} className={tab === "schedules" ? "active" : ""} onClick={() => setTab("schedules")}>Schedules</button></div>}
     {tab === "reports" ? <>
       {user.role === "administrator" && <Card className="report-builder"><CardHead title="Generate network report" detail="The current revision of the selected saved Flow view supplies the filters." /><form onSubmit={submitGenerate} className="report-form">
         <label>Saved Flow view<select aria-label="Report saved Flow view" value={generateForm.saved_view_id} onChange={(event) => setGenerateForm({ ...generateForm, saved_view_id: event.target.value })} required><option value="">Select a view…</option>{(savedViews.data?.items ?? []).filter((view) => view.compatible).map((view) => <option value={view.id} key={view.id}>{view.name} · {view.owner.username}</option>)}</select></label>
@@ -3542,7 +3690,7 @@ export function Reports({ user }: { user: ReportsUser }) {
         <Button type="submit" disabled={!generateForm.saved_view_id || action.isPending}><Play /> Queue report</Button>
       </form>{action.error && <p className="form-error">{action.error.message}</p>}</Card>}
       <div className="report-list-head"><h2>Report history</h2><div className="report-history-filters"><select aria-label="Report status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option>{["queued", "running", "completed", "partial", "failed"].map((value) => <option value={value} key={value}>{value}</option>)}</select>{user.role === "administrator" && <><select aria-label="Report schedule filter" value={scheduleFilter} onChange={(event) => setScheduleFilter(event.target.value)}><option value="">All schedules</option>{schedules.data?.items.map((schedule) => <option value={schedule.id} key={schedule.id}>{schedule.name}</option>)}</select><select aria-label="Report saved view filter" value={viewFilter} onChange={(event) => setViewFilter(event.target.value)}><option value="">All saved views</option>{savedViews.data?.items.map((view) => <option value={view.id} key={view.id}>{view.name}</option>)}</select></>}<label>From<input aria-label="Reports from date" type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} /></label><label>To<input aria-label="Reports to date" type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} /></label>{(statusFilter || scheduleFilter || viewFilter || dateFrom || dateTo) && <Button variant="ghost" onClick={() => { setStatusFilter(""); setScheduleFilter(""); setViewFilter(""); setDateFrom(""); setDateTo(""); }}>Clear filters</Button>}</div></div>
-      {reports.isLoading ? <Loading /> : reports.error ? <ErrorState error={reports.error} /> : reportRows.length === 0 ? <Empty title="No matching reports" detail={(statusFilter || scheduleFilter || viewFilter || dateFrom || dateTo) ? "Adjust the report filters to see other runs." : "An Administrator can generate a report from a saved Flow view."} /> : <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Report</th><th>Range</th><th>Status</th><th>Coverage</th><th>Generated</th><th>Formats</th></tr></thead><tbody>{reportRows.map((row) => <tr key={row.id} className="clickable-row" onClick={() => setSelectedId(row.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") setSelectedId(row.id); }}><td><strong>{row.title}</strong><small className="block">{row.retry_of_id ? "Retry run" : row.saved_view_revision ? `Saved view revision ${row.saved_view_revision}` : "Saved view unavailable"}</small></td><td>{new Date(row.range_start).toLocaleDateString()} – {new Date(row.range_end).toLocaleDateString()}</td><td><Badge tone={row.status === "completed" ? "success" : row.status === "failed" ? "danger" : "warning"}>{row.status}</Badge>{["queued", "running"].includes(row.status) && <small className="block">{row.generation_stage} · {row.progress}%</small>}</td><td>{row.coverage.complete ? "Complete" : "Partial"}</td><td>{relativeTime(row.completed_at ?? row.created_at)}</td><td>{row.artifacts.map((artifact) => artifact.format.toUpperCase()).join(" · ") || "Pending"}</td></tr>)}</tbody></table></div>{reports.hasNextPage && <Button variant="secondary" onClick={() => void reports.fetchNextPage()}>Load more</Button>}</Card>}
+      {reports.isLoading ? <Loading /> : reports.error ? <ErrorState error={reports.error} /> : reportRows.length === 0 ? <Empty title="No matching reports" detail={(statusFilter || scheduleFilter || viewFilter || dateFrom || dateTo) ? "Adjust the report filters to see other runs." : "An Administrator can generate a report from a saved Flow view."} /> : <Card className="table-card"><div className="table-scroll" tabIndex={0}><table><thead><tr><th>Report</th><th>Range</th><th>Status</th><th>Coverage</th><th>Generated</th><th>Formats</th></tr></thead><tbody>{reportRows.map((row) => <tr key={row.id} className="clickable-row" onClick={() => setSelectedId(row.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") setSelectedId(row.id); }}><td><strong>{row.title}</strong><small className="block">{row.retry_of_id ? "Retry run" : row.saved_view_revision ? `Saved view revision ${row.saved_view_revision}` : "Saved view unavailable"}</small></td><td>{new Date(row.range_start).toLocaleDateString()} – {new Date(row.range_end).toLocaleDateString()}</td><td><Badge tone={row.status === "completed" ? "success" : row.status === "failed" ? "danger" : "warning"}>{row.status}</Badge>{["queued", "running"].includes(row.status) && <small className="block">{row.generation_stage} · {row.progress}%</small>}</td><td>{row.coverage.complete ? "Complete" : "Partial"}</td><td>{relativeTime(row.completed_at ?? row.created_at)}</td><td>{row.artifacts.map((artifact) => artifact.format.toUpperCase()).join(" · ") || "Pending"}</td></tr>)}</tbody></table></div>{reports.hasNextPage && <Button variant="secondary" onClick={() => void reports.fetchNextPage()}>Load more</Button>}</Card>}
     </> : <>
       <Card className="report-builder"><CardHead title={editingSchedule ? `Edit ${editingSchedule.name}` : "New report schedule"} detail="Daily, weekly, and monthly schedules use the selected IANA timezone." action={editingSchedule ? <Button variant="ghost" onClick={() => setEditingSchedule(null)}>Cancel edit</Button> : undefined} /><form onSubmit={submitSchedule} className="report-form schedule-form">
         <label>Name<input value={scheduleForm.name} maxLength={128} onChange={(event) => setScheduleForm({ ...scheduleForm, name: event.target.value })} required /></label>
@@ -3558,7 +3706,7 @@ export function Reports({ user }: { user: ReportsUser }) {
       {!schedules.data?.items.length ? <Empty title="No report schedules" detail="Create a schedule to retain consistent daily, weekly, or monthly evidence." /> : <div className="schedule-list">{schedules.data?.items.map((schedule) => <Card key={schedule.id}><div className="schedule-main"><strong>{schedule.name}</strong><p>{schedule.frequency} at {schedule.local_time} · {schedule.timezone}</p><small>{schedule.last_error || (schedule.next_run_at ? `Next ${relativeTime(schedule.next_run_at)}` : "Paused")}</small><small className="block">Top {schedule.report_options.ranking_limit} · {schedule.report_options.sections.length} sections · {schedule.report_options.include_previous_period ? "comparison enabled" : "no comparison"}</small>{schedule.recent_runs?.length ? <div className="schedule-runs"><span>Recent runs</span>{schedule.recent_runs.map((run) => <button key={run.id} onClick={() => { setSelectedId(run.id); setTab("reports"); }}><Badge tone={run.status === "completed" ? "success" : run.status === "failed" ? "danger" : "warning"}>{run.status}</Badge>{relativeTime(run.completed_at ?? run.created_at)}</button>)}</div> : <small className="block">No runs yet</small>}</div><Badge tone={schedule.enabled ? "success" : "neutral"}>{schedule.enabled ? "enabled" : "paused"}</Badge><Button variant="ghost" onClick={() => editSchedule(schedule)}>Edit</Button><Button variant="ghost" onClick={() => action.mutate({ path: `/report-schedules/${schedule.id}/run` })}>Run now</Button><Button variant="ghost" onClick={() => action.mutate({ path: `/report-schedules/${schedule.id}`, method: "PUT", body: { name: schedule.name, saved_view_id: schedule.saved_view_id, frequency: schedule.frequency, timezone: schedule.timezone, local_time: schedule.local_time, weekday: schedule.weekday, month_day: schedule.month_day, enabled: !schedule.enabled, report_options: schedule.report_options } })}>{schedule.enabled ? "Pause" : "Resume"}</Button><Button variant="ghost" onClick={() => { if (window.confirm(`Delete report schedule “${schedule.name}”?`)) action.mutate({ path: `/report-schedules/${schedule.id}`, method: "DELETE" }); }}>Delete</Button></Card>)}</div>}
     </>}
     {selectedId && <div className="drawer-backdrop" onMouseDown={() => setSelectedId("")}>
-      <aside className="details-drawer report-drawer" onMouseDown={(event) => event.stopPropagation()} aria-label="Report details">
+      <aside ref={reportDialogRef} className="details-drawer report-drawer" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()} aria-label="Report details">
         <button className="drawer-close" aria-label="Close report" onClick={() => setSelectedId("")}><X /></button>
         {detail.isLoading ? <Loading /> : detail.error ? <ErrorState error={detail.error} /> : report ? <>
           <p className="eyebrow">NETWORK REPORT</p>

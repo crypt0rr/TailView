@@ -5,6 +5,7 @@ import { useSearchParams } from "react-router-dom";
 import { request } from "./api";
 import { Badge, Button, ErrorState, Loading } from "./components";
 import type { SavedViewRecord } from "./types";
+import { useDialogFocus } from "./useDialogFocus";
 
 type SavedViewsProps<T extends Record<string, unknown>> = {
   page: string;
@@ -167,7 +168,8 @@ function ViewEditor({ form, setForm, error, pending, close, save, title }: {
   setForm: (value: { name: string; description: string; visibility: string }) => void;
   error: string; pending: boolean; close: () => void; save: () => void; title: string;
 }) {
-  return <div className="dialog-backdrop" onMouseDown={close}><section className="saved-view-dialog" role="dialog" aria-modal="true" aria-label="Save view" onMouseDown={(event) => event.stopPropagation()}>
+  const dialogRef = useDialogFocus(close);
+  return <div className="dialog-backdrop" onMouseDown={close}><section ref={dialogRef} className="saved-view-dialog" role="dialog" aria-modal="true" aria-label="Save view" onMouseDown={(event) => event.stopPropagation()}>
     <header><div><h2>{title}</h2><p>Filters and presentation settings only.</p></div><button className="icon-button" aria-label="Close" onClick={close}><X /></button></header>
     <label>Name<input autoFocus maxLength={128} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
     <label>Description<textarea maxLength={500} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label>
@@ -181,6 +183,7 @@ function ManageViews({ page, views, loading, error, close, refresh }: {
   page: string; views: SavedViewRecord[]; loading: boolean; error: Error | null;
   close: () => void; refresh: () => Promise<void>;
 }) {
+  const dialogRef = useDialogFocus(close);
   const mine = views.filter((view) => view.is_owner);
   const shared = views.filter((view) => view.visibility === "shared" && !view.is_owner);
   const administered = views.filter(
@@ -197,7 +200,7 @@ function ManageViews({ page, views, loading, error, close, refresh }: {
     await request(`/saved-views/${view.id}/clone`, { method: "POST", body: JSON.stringify({ name, visibility: "private" }) });
     await refresh();
   };
-  return <div className="dialog-backdrop" onMouseDown={close}><section className="saved-view-dialog manage" role="dialog" aria-modal="true" aria-label="Manage saved views" onMouseDown={(event) => event.stopPropagation()}>
+  return <div className="dialog-backdrop" onMouseDown={close}><section ref={dialogRef} className="saved-view-dialog manage" role="dialog" aria-modal="true" aria-label="Manage saved views" onMouseDown={(event) => event.stopPropagation()}>
     <header><div><h2>Manage saved views</h2><p>{page.replaceAll("_", " ")}</p></div><button className="icon-button" aria-label="Close" onClick={close}><X /></button></header>
     {loading ? <Loading /> : error ? <ErrorState error={error} /> : <>
       <ViewList title="My views" views={mine} action={(view) => <Button variant="ghost" onClick={() => void remove(view)}><Trash2 /> Delete</Button>} />

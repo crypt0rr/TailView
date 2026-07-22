@@ -23,6 +23,7 @@ from .models import (
     Credential,
     Device,
     DeviceConnectivity,
+    DeviceHistoryEvent,
     DeviceInvite,
     DevicePostureAttribute,
     DevicePostureState,
@@ -59,6 +60,50 @@ DEVICE_INVENTORY_DETAIL_FIELDS = {
     "tailnetLockKey",
     "updateAvailable",
 }
+
+DEVICE_HISTORY_FIELDS = (
+    "authorized",
+    "owner_id",
+    "tags",
+    "addresses",
+    "advertised_routes",
+    "approved_routes",
+    "key_expiry",
+    "key_expiry_disabled",
+    "version",
+    "online",
+    "last_seen",
+    "roles",
+    "primary_role",
+)
+
+
+def _device_history_snapshot(device: Device) -> dict[str, Any]:
+    return {
+        field: (
+            value.isoformat() if isinstance((value := getattr(device, field)), datetime) else value
+        )
+        for field in DEVICE_HISTORY_FIELDS
+    }
+
+
+def _record_device_changes(
+    session: AsyncSession, device: Device, before: dict[str, Any], occurred_at: datetime
+) -> None:
+    after = _device_history_snapshot(device)
+    changed = [field for field in DEVICE_HISTORY_FIELDS if before.get(field) != after.get(field)]
+    if changed:
+        session.add(
+            DeviceHistoryEvent(
+                device_id=device.id,
+                event_type="inventory_changed",
+                source="device_sync",
+                changed_fields=changed,
+                before={field: before.get(field) for field in changed},
+                after={field: after.get(field) for field in changed},
+                occurred_at=occurred_at,
+            )
+        )
 
 
 def parse_time(value: Any) -> datetime | None:
@@ -358,7 +403,10 @@ async def _devices_worker(session: AsyncSession, client: TailscaleClient) -> Sou
         upstream_id = preferred_device_id(item)
         if not upstream_id:
             continue
-        device = await session.get(Device, upstream_id) or Device(id=upstream_id, name=upstream_id)
+        device = await session.get(Device, upstream_id)
+        existed = device is not None
+        device = device or Device(id=upstream_id, name=upstream_id)
+        before = _device_history_snapshot(device) if existed else {}
         device.name = str(item.get("name") or upstream_id)
         device.hostname = str(item.get("hostname") or device.name.split(".")[0])
         device.os = str(item.get("os") or "unknown")
@@ -385,6 +433,8 @@ async def _devices_worker(session: AsyncSession, client: TailscaleClient) -> Sou
         device.raw = redact(item)
         device.synced_at = datetime.now(UTC)
         session.add(device)
+        if existed:
+            _record_device_changes(session, device, before, device.synced_at)
         connectivity = item.get("clientConnectivity")
         if isinstance(connectivity, dict):
             snapshot = await session.get(DeviceConnectivity, upstream_id) or DeviceConnectivity(
@@ -638,12 +688,14 @@ async def _routes_worker(session: AsyncSession, client: TailscaleClient) -> Sour
         if isinstance(result, TailscaleError):
             errors[capability_status(result)] += 1
             continue
+        before = _device_history_snapshot(device)
         advertised = list(result.get("advertisedRoutes") or [])
         approved = list(result.get("enabledRoutes") or result.get("approvedRoutes") or [])
         device.advertised_routes = advertised
         device.approved_routes = approved
         device.roles, device.primary_role = classify(device.raw, advertised)
         device.synced_at = datetime.now(UTC)
+        _record_device_changes(session, device, before, device.synced_at)
         succeeded += 1
     failed = len(devices) - succeeded
     if devices and succeeded == 0:

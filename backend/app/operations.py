@@ -15,6 +15,7 @@ from .db import SessionLocal, engine
 from .models import (
     BackupVerification,
     CleanupRun,
+    DeviceHistoryEvent,
     Finding,
     Flow,
     FlowAggregate,
@@ -27,6 +28,7 @@ from .models import (
     ReportRun,
     Session,
     SyncJob,
+    TelemetryObservation,
 )
 from .reporting import cleanup_flow_data
 
@@ -214,6 +216,8 @@ async def storage_snapshot(session: AsyncSession) -> dict[str, Any]:
         "sessions": Session,
         "findings": Finding,
         "delivery_history": NotificationDelivery,
+        "device_history": DeviceHistoryEvent,
+        "telemetry_observations": TelemetryObservation,
     }
     counts = {
         name: int(await session.scalar(select(func.count()).select_from(model)) or 0)
@@ -238,9 +242,12 @@ async def retention_snapshot(
     report_cutoff = now - timedelta(days=settings.report_artifact_retention_days)
     payload_cutoff = now - timedelta(days=settings.raw_payload_retention_days)
     finding_cutoff = now - timedelta(days=settings.findings_retention_days)
+    history_cutoff = now - timedelta(days=settings.device_history_retention_days)
+    telemetry_cutoff = now - timedelta(days=settings.telemetry_retention_days)
     states = {
         row.granularity: row for row in (await session.scalars(select(FlowAggregateState))).all()
     }
+
     def covers_raw_cutoff(state: FlowAggregateState | None) -> bool:
         if state is None or state.last_success is None:
             return False
@@ -303,6 +310,22 @@ async def retention_snapshot(
             )
             or 0
         ),
+        "device_history": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(DeviceHistoryEvent)
+                .where(DeviceHistoryEvent.occurred_at < history_cutoff)
+            )
+            or 0
+        ),
+        "telemetry_observations": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(TelemetryObservation)
+                .where(TelemetryObservation.observed_at < telemetry_cutoff)
+            )
+            or 0
+        ),
     }
     return {
         "as_of": now,
@@ -324,6 +347,8 @@ async def retention_snapshot(
             "reports": settings.report_artifact_retention_days,
             "raw_payloads": settings.raw_payload_retention_days,
             "findings": settings.findings_retention_days,
+            "device_history": settings.device_history_retention_days,
+            "telemetry_observations": settings.telemetry_retention_days,
         },
     }
 
@@ -373,6 +398,18 @@ async def run_cleanup(trigger: str = "scheduled") -> CleanupRun:
                     ReportRun.completed_at.is_not(None),
                     ReportRun.completed_at
                     < now - timedelta(days=settings.report_artifact_retention_days),
+                )
+            )
+            await session.execute(
+                delete(DeviceHistoryEvent).where(
+                    DeviceHistoryEvent.occurred_at
+                    < now - timedelta(days=settings.device_history_retention_days)
+                )
+            )
+            await session.execute(
+                delete(TelemetryObservation).where(
+                    TelemetryObservation.observed_at
+                    < now - timedelta(days=settings.telemetry_retention_days)
                 )
             )
             await session.execute(

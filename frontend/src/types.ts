@@ -21,21 +21,72 @@ export interface Device {
   advertised_routes: string[];
   approved_routes: string[];
   roles: string[];
+  api_roles?: string[];
   primary_role: string;
+  api_primary_role?: string;
   source: string;
   inventory_details?: Record<string, unknown>;
   metadata: null | {
+    display_name?: string;
     description?: string;
     function?: string;
+    functional_groups: string[];
+    custom_roles: string[];
+    primary_role_override?: string | null;
     environment?: string;
     location?: string;
     criticality?: string;
     icon?: string;
     hidden: boolean;
+    default_map_visible: boolean;
+    revision: number;
+    updated_at?: string;
   };
   address_inventory?: AddressInventory;
   posture?: DevicePosture;
   connectivity?: DeviceConnectivity;
+  telemetry?: TelemetryObservation | null;
+}
+
+export interface DeviceHistoryEvent {
+  id: string;
+  event_type: string;
+  source: string;
+  changed_fields: string[];
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  actor_id: string | null;
+  occurred_at: string;
+}
+
+export interface DeviceAccessRelationship {
+  direction: "inbound" | "outbound";
+  source: { id: string; label: string };
+  destination: { id: string; label: string };
+  state: "permitted" | "observed" | "both" | "historical_without_current_allow" | "evaluation_incomplete";
+  rules: Array<{ id: string; ports: string[]; protocol: string | string[]; status: string; source_path: string[]; destination_path: string[]; policy_path: string; posture: string[]; source_lines: { start: number | null; end: number | null } }>;
+  observation: null | { reported_bytes: number; last_observed_at: string };
+}
+
+export interface TelemetryObservation {
+  id: string;
+  collector_node_id: string | null;
+  collector_device_id: string | null;
+  collector_name?: string;
+  client_version: string;
+  udp: boolean | null;
+  ipv4: boolean | null;
+  ipv6: boolean | null;
+  mapping_varies_by_dest_ip: boolean | null;
+  preferred_derp: string | null;
+  endpoints: unknown[];
+  derp_latency: Record<string, number>;
+  observed_at: string;
+  received_at: string;
+  stale: boolean;
+  scope: string;
+  provenance: "local_telemetry";
+  notice: string;
 }
 
 export interface AppSession {

@@ -19,6 +19,7 @@ import {
   Gauge,
   GitBranch,
   Globe2,
+  RadioTower,
   LayoutDashboard,
   KeyRound,
   LogOut,
@@ -41,6 +42,7 @@ import {
 import { api, ApiError, request, type AuthResult, type CurrentUser } from "./api";
 import { Button, Loading } from "./components";
 import { useTimeRange } from "./timeRange";
+import { useDialogFocus } from "./useDialogFocus";
 import type { SavedViewRecord } from "./types";
 import {
   Dashboard,
@@ -59,6 +61,7 @@ import {
   TailViewAccess,
   AccessGovernance,
   Topology,
+  Telemetry,
 } from "./pages";
 
 export const nav = [
@@ -82,8 +85,22 @@ export const nav = [
   ["Audit", "/audit", Shield],
   ["Sync jobs", "/sync", RefreshCw],
   ["DNS", "/dns", Globe2],
+  ["Telemetry", "/telemetry", RadioTower],
   ["Settings", "/settings", Settings],
 ] as const;
+
+const administratorOnlyPaths = new Set([
+  "/operations",
+  "/security/governance",
+  "/dns",
+  "/settings",
+]);
+
+export function navigationForRole(role: CurrentUser["role"]) {
+  return role === "administrator"
+    ? nav
+    : nav.filter(([, path]) => !administratorOnlyPaths.has(path));
+}
 
 type CapabilityResult = {
   name: string;
@@ -117,6 +134,7 @@ const navigationCapabilities: Record<string, string> = {
   "/security/governance": "access_governance",
   "/audit": "configuration_audit_logs",
   "/dns": "dns",
+  "/telemetry": "local_telemetry",
 };
 
 const unavailableCapabilityStates = new Set([
@@ -410,10 +428,7 @@ export function Shell({
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { range, setRange } = useTimeRange();
-  const roleNav =
-    user.role === "administrator"
-      ? nav
-      : nav.filter(([label]) => !["DNS", "Access governance", "Operations"].includes(label));
+  const roleNav = navigationForRole(user.role);
   const capabilities = useQuery({
     queryKey: ["navigation-capabilities"],
     queryFn: () => request<{
@@ -595,19 +610,19 @@ export function Shell({
         <main className="content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
-            <Route path="/topology" element={<Topology />} />
+            <Route path="/topology" element={<Topology user={user} />} />
             <Route path="/flows" element={<Flows />} />
             <Route path="/reports" element={<Reports user={user} />} />
             <Route path="/operations" element={user.role === "administrator" ? <Operations /> : <Navigate to="/" replace />} />
-            <Route path="/devices" element={<Devices />} />
+            <Route path="/devices" element={<Devices user={user} />} />
             <Route path="/users" element={<InventoryPage kind="users" />} />
             <Route path="/groups" element={<InventoryPage kind="groups" />} />
             <Route path="/routes" element={<InventoryPage kind="routes" />} />
             <Route path="/services" element={<Services />} />
-            <Route path="/exit-nodes" element={<Devices role="exit_node" />} />
+            <Route path="/exit-nodes" element={<Devices role="exit_node" user={user} />} />
             <Route
               path="/subnet-routers"
-              element={<Devices role="subnet_router" />}
+              element={<Devices role="subnet_router" user={user} />}
             />
             <Route path="/tags" element={<InventoryPage kind="tags" />} />
             <Route path="/policy" element={<Policy />} />
@@ -636,7 +651,17 @@ export function Shell({
                 )
               }
             />
-            <Route path="/settings" element={<SettingsPage user={user} />} />
+            <Route
+              path="/settings"
+              element={
+                user.role === "administrator" ? (
+                  <SettingsPage user={user} />
+                ) : (
+                  <Navigate to="/" replace />
+                )
+              }
+            />
+            <Route path="/telemetry" element={<Telemetry />} />
             <Route path="/settings/access" element={user.role === "administrator" ? <TailViewAccess /> : <Navigate to="/security/account" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
@@ -651,6 +676,7 @@ function CommandPalette({
   items: ReadonlyArray<(typeof nav)[number]>;
 }) {
   const [open, setOpen] = useState(false);
+  const dialogRef = useDialogFocus<HTMLDivElement>(() => setOpen(false), open);
   const navigate = useNavigate();
   const savedViews = useQuery({
     queryKey: ["saved-views", "command-palette"],
@@ -669,7 +695,6 @@ function CommandPalette({
         e.preventDefault();
         setOpen((v) => !v);
       }
-      if (e.key === "Escape") setOpen(false);
     };
     document.addEventListener("keydown", h);
     return () => document.removeEventListener("keydown", h);
@@ -678,10 +703,12 @@ function CommandPalette({
   return (
     <div className="dialog-backdrop" onMouseDown={() => setOpen(false)}>
       <div
+        ref={dialogRef}
         className="command-dialog"
         onMouseDown={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
+        aria-label="Command palette"
       >
         <div>
           <Search />

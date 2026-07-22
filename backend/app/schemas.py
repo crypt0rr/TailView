@@ -176,11 +176,24 @@ class MetadataUpdate(BaseModel):
     display_name: str | None = Field(default=None, max_length=255)
     description: str | None = Field(default=None, max_length=2000)
     function: str | None = Field(default=None, max_length=128)
+    functional_groups: list[str] = Field(default_factory=list, max_length=32)
+    custom_roles: list[str] = Field(default_factory=list, max_length=16)
+    primary_role_override: str | None = Field(default=None, max_length=64)
     environment: str | None = Field(default=None, max_length=64)
     location: str | None = Field(default=None, max_length=128)
     criticality: Literal["low", "medium", "high", "critical"] | None = None
     icon: str | None = Field(default=None, max_length=64)
     hidden: bool = False
+    default_map_visible: bool = True
+    expected_revision: int | None = Field(default=None, ge=1)
+
+    @field_validator("functional_groups", "custom_roles")
+    @classmethod
+    def normalized_metadata_values(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if item.strip()]
+        if any(len(item) > 64 for item in cleaned):
+            raise ValueError("Metadata values must not exceed 64 characters")
+        return list(dict.fromkeys(cleaned))
 
 
 class CredentialRequest(BaseModel):

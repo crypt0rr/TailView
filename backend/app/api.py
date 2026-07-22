@@ -48,6 +48,7 @@ from .models import (
     Credential,
     Device,
     DeviceConnectivity,
+    DeviceHistoryEvent,
     DeviceInvite,
     DevicePostureAttribute,
     DevicePostureState,
@@ -67,6 +68,7 @@ from .models import (
     OperationalJobRun,
     PolicySnapshot,
     PostureIntegration,
+    RawPayload,
     ReportArtifact,
     ReportRun,
     ReportSchedule,
@@ -137,6 +139,7 @@ from .security import (
     verify_totp,
 )
 from .sync import (
+    redact,
     sync_contacts,
     sync_credentials,
     sync_device_invites,
@@ -167,6 +170,14 @@ def device_dict(
     metadata: LocalMetadata | None = None,
     owner: TailnetUser | None = None,
 ) -> dict[str, Any]:
+    source_roles = list(device.roles or [])
+    custom_roles = list(metadata.custom_roles or []) if metadata else []
+    effective_roles = list(dict.fromkeys([*source_roles, *custom_roles]))
+    effective_primary = (
+        metadata.primary_role_override
+        if metadata and metadata.primary_role_override
+        else device.primary_role
+    )
     return {
         "id": device.id,
         "name": metadata.display_name if metadata and metadata.display_name else device.name,
@@ -189,18 +200,27 @@ def device_dict(
         "tags": device.tags,
         "advertised_routes": device.advertised_routes,
         "approved_routes": device.approved_routes,
-        "roles": device.roles,
-        "primary_role": device.primary_role,
+        "roles": effective_roles,
+        "api_roles": source_roles,
+        "primary_role": effective_primary,
+        "api_primary_role": device.primary_role,
         "source": device.source,
         "inventory_details": device.inventory_details,
         "metadata": {
+            "display_name": metadata.display_name,
             "description": metadata.description,
             "function": metadata.function,
+            "functional_groups": metadata.functional_groups or [],
+            "custom_roles": metadata.custom_roles or [],
+            "primary_role_override": metadata.primary_role_override,
             "environment": metadata.environment,
             "location": metadata.location,
             "criticality": metadata.criticality,
             "icon": metadata.icon,
             "hidden": metadata.hidden,
+            "default_map_visible": metadata.default_map_visible,
+            "revision": metadata.revision,
+            "updated_at": metadata.updated_at,
         }
         if metadata
         else None,
@@ -426,6 +446,35 @@ def preferred_device_label(
     device_id: str | None, raw_value: str | None, labels: dict[str, str]
 ) -> str:
     return (labels.get(device_id) if device_id else None) or device_id or raw_value or "Unavailable"
+
+
+def _telemetry_item(row: TelemetryObservation | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    stale = datetime.now(UTC) - (
+        row.observed_at if row.observed_at.tzinfo else row.observed_at.replace(tzinfo=UTC)
+    ) > timedelta(minutes=5)
+    return {
+        "id": row.id,
+        "collector_node_id": row.collector_node_id,
+        "collector_device_id": row.collector_device_id,
+        "client_version": row.client_version,
+        "udp": row.udp,
+        "ipv4": row.ipv4,
+        "ipv6": row.ipv6,
+        "mapping_varies_by_dest_ip": row.mapping_varies_by_dest_ip,
+        "preferred_derp": row.preferred_derp,
+        "endpoints": row.endpoints or [],
+        "derp_latency": row.derp_latency or {},
+        "observed_at": row.observed_at,
+        "received_at": row.received_at,
+        "stale": stale,
+        "scope": row.scope,
+        "provenance": "local_telemetry",
+        "notice": (
+            "Single-collector point-in-time observation; not a live or tailnet-wide measurement."
+        ),
+    }
 
 
 @router.get("/setup/status")
@@ -2231,21 +2280,278 @@ async def device(
             "notice": "Client connectivity was not supplied by the device API.",
         }
     )
+    latest_telemetry = await db.scalar(
+        select(TelemetryObservation)
+        .where(TelemetryObservation.collector_device_id == device_id)
+        .order_by(TelemetryObservation.observed_at.desc())
+        .limit(1)
+    )
+    item["telemetry"] = _telemetry_item(latest_telemetry) if latest_telemetry else None
     return item
+
+
+def _history_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _metadata_snapshot(metadata: LocalMetadata) -> dict[str, Any]:
+    return {
+        key: _history_value(getattr(metadata, key))
+        for key in (
+            "display_name",
+            "description",
+            "functional_groups",
+            "custom_roles",
+            "primary_role_override",
+            "environment",
+            "location",
+            "criticality",
+            "icon",
+            "default_map_visible",
+        )
+    }
 
 
 @router.put("/devices/{device_id}/metadata")
 async def update_metadata(
-    device_id: str, payload: MetadataUpdate, _: Admin, __: Csrf, db: Db
-) -> dict[str, str]:
+    device_id: str,
+    payload: MetadataUpdate,
+    actor: Admin,
+    __: Csrf,
+    db: Db,
+    request: Request,
+) -> dict[str, Any]:
     if not await db.get(Device, device_id):
         raise HTTPException(404, "Device not found")
     metadata = await db.get(LocalMetadata, device_id) or LocalMetadata(device_id=device_id)
-    for key, value in payload.model_dump().items():
+    if payload.expected_revision is not None and metadata.revision != payload.expected_revision:
+        raise HTTPException(409, "Device metadata was modified by another administrator")
+    before = _metadata_snapshot(metadata)
+    values = payload.model_dump(exclude={"expected_revision"})
+    values["function"] = values["functional_groups"][0] if values["functional_groups"] else None
+    values["hidden"] = not values["default_map_visible"]
+    for key, value in values.items():
         setattr(metadata, key, value)
+    metadata.revision = (metadata.revision or 0) + 1
+    metadata.updated_at = datetime.now(UTC)
+    after = _metadata_snapshot(metadata)
+    changed = [key for key in after if before.get(key) != after.get(key)]
     db.add(metadata)
+    if changed:
+        event = DeviceHistoryEvent(
+            device_id=device_id,
+            event_type="metadata_changed",
+            source="local_metadata",
+            changed_fields=changed,
+            before={key: before.get(key) for key in changed},
+            after={key: after.get(key) for key in changed},
+            actor_id=actor.id,
+            correlation_id=getattr(request.state, "correlation_id", ""),
+        )
+        db.add(event)
+        auth.add_security_event(
+            db,
+            request,
+            "device_metadata.update",
+            actor_id=actor.id,
+            subject_id=device_id,
+            details={"changed_fields": changed},
+        )
     await db.commit()
-    return {"status": "updated"}
+    return {
+        "status": "updated",
+        "metadata": _metadata_snapshot(metadata),
+        "revision": metadata.revision,
+    }
+
+
+@router.get("/devices/{device_id}/history")
+async def device_history(
+    device_id: str,
+    _: Authed,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    source: str = "",
+    event_type: str = "",
+) -> dict[str, Any]:
+    if not await db.get(Device, device_id):
+        raise HTTPException(404, "Device not found")
+    query = select(DeviceHistoryEvent).where(DeviceHistoryEvent.device_id == device_id)
+    if source:
+        query = query.where(DeviceHistoryEvent.source == source)
+    if event_type:
+        query = query.where(DeviceHistoryEvent.event_type == event_type)
+    cursor_data = decode_cursor(cursor, "device_history")
+    if cursor_data:
+        occurred = datetime.fromisoformat(str(cursor_data["occurred_at"]))
+        event_id = str(cursor_data["id"])
+        query = query.where(
+            or_(
+                DeviceHistoryEvent.occurred_at < occurred,
+                and_(DeviceHistoryEvent.occurred_at == occurred, DeviceHistoryEvent.id < event_id),
+            )
+        )
+    rows = (
+        await db.scalars(
+            query.order_by(
+                DeviceHistoryEvent.occurred_at.desc(), DeviceHistoryEvent.id.desc()
+            ).limit(limit + 1)
+        )
+    ).all()
+    page = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit and page:
+        last = page[-1]
+        next_cursor = encode_cursor(
+            "device_history", {"occurred_at": last.occurred_at.isoformat(), "id": last.id}
+        )
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "event_type": row.event_type,
+                "source": row.source,
+                "changed_fields": row.changed_fields,
+                "before": row.before,
+                "after": row.after,
+                "actor_id": row.actor_id,
+                "occurred_at": row.occurred_at,
+            }
+            for row in page
+        ],
+        "next_cursor": next_cursor,
+        "notice": "History begins after TailView deployed device-history collection.",
+    }
+
+
+@router.get("/devices/{device_id}/access")
+async def device_access(
+    device_id: str,
+    _: Authed,
+    db: Db,
+    hours: int = Query(24),
+) -> dict[str, Any]:
+    if hours not in {1, 24, 168, 720}:
+        raise HTTPException(422, "hours must be one of 1, 24, 168, or 720")
+    selected_device = await db.get(Device, device_id)
+    if not selected_device:
+        raise HTTPException(404, "Device not found")
+    device_rows = (await db.scalars(select(Device).where(Device.active.is_(True)))).all()
+    metadata_rows = {row.device_id: row for row in (await db.scalars(select(LocalMetadata))).all()}
+    owners = {row.id: row for row in (await db.scalars(select(TailnetUser))).all()}
+    nodes = [
+        device_dict(row, metadata_rows.get(row.id), owners.get(row.owner_id or ""))
+        for row in device_rows
+    ]
+    labels = {str(row["id"]): str(row["name"]) for row in nodes}
+    snapshot = await db.scalar(
+        select(PolicySnapshot)
+        .where(PolicySnapshot.valid.is_(True))
+        .order_by(PolicySnapshot.retrieved_at.desc())
+        .limit(1)
+    )
+    relationships = (
+        evaluate_policy(
+            snapshot.normalized if snapshot else {},
+            nodes,
+            [
+                {"id": owner.id, "login_name": owner.login_name, "display_name": owner.display_name}
+                for owner in owners.values()
+            ],
+        )
+        if snapshot
+        else []
+    )
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
+    observed_rows = (
+        await db.execute(
+            select(
+                Flow.source_device_id,
+                Flow.destination_device_id,
+                func.sum(Flow.tx_bytes + Flow.rx_bytes),
+                func.max(Flow.end),
+            )
+            .where(
+                Flow.start >= cutoff,
+                or_(Flow.source_device_id == device_id, Flow.destination_device_id == device_id),
+            )
+            .group_by(Flow.source_device_id, Flow.destination_device_id)
+        )
+    ).all()
+    observed = {
+        (source_id, destination_id): {"reported_bytes": int(volume or 0), "last_observed_at": last}
+        for source_id, destination_id, volume, last in observed_rows
+        if source_id and destination_id
+    }
+    policy_pairs: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    grant_count = len(snapshot.normalized.get("grants", [])) if snapshot else 0
+    for relationship in relationships:
+        if snapshot is None:
+            continue
+        pair = (str(relationship["source"]), str(relationship["destination"]))
+        index = int(relationship["rule_index"])
+        section = "grants" if index < grant_count else "acls"
+        section_index = index if section == "grants" else index - grant_count
+        relationship = {
+            **relationship,
+            "policy_path": f'$["{section}"][{section_index}]',
+            "source_lines": {
+                "start": source_line(
+                    snapshot.hujson,
+                    str(relationship["source_path"][-1]) if relationship["source_path"] else "",
+                )[0],
+                "end": source_line(
+                    snapshot.hujson,
+                    str(relationship["destination_path"][-1])
+                    if relationship["destination_path"]
+                    else "",
+                )[1],
+            },
+        }
+        policy_pairs.setdefault(pair, []).append(relationship)
+    pairs = set(observed) | set(policy_pairs)
+    items = []
+    for source_id, destination_id in pairs:
+        if device_id not in {source_id, destination_id}:
+            continue
+        rules = policy_pairs.get((source_id, destination_id), [])
+        observation = observed.get((source_id, destination_id))
+        incomplete = any(rule["status"] != "fully_evaluated" for rule in rules)
+        state = (
+            "evaluation_incomplete"
+            if incomplete
+            else "both"
+            if rules and observation
+            else "permitted"
+            if rules
+            else "historical_without_current_allow"
+        )
+        items.append(
+            {
+                "direction": "outbound" if source_id == device_id else "inbound",
+                "source": {"id": source_id, "label": labels.get(source_id, source_id)},
+                "destination": {
+                    "id": destination_id,
+                    "label": labels.get(destination_id, destination_id),
+                },
+                "state": state,
+                "rules": rules,
+                "observation": observation,
+            }
+        )
+    return {
+        "items": sorted(items, key=lambda item: (item["direction"], item["destination"]["label"])),
+        "hours": hours,
+        "policy_retrieved_at": snapshot.retrieved_at if snapshot else None,
+        "notice": (
+            "Current policy and current posture are evaluated separately from historical "
+            "client-reported flows. Historical traffic without a current allow is not labelled "
+            "a bypass."
+        ),
+    }
 
 
 @router.get("/users")
@@ -3067,6 +3373,9 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
     groups_value = snapshot.normalized.get("groups", {}) if snapshot else {}
     group_count = len(groups_value) if isinstance(groups_value, dict) else 0
     tag_count = len({str(tag) for device in active_devices for tag in device.tags})
+    telemetry_count = int(
+        await db.scalar(select(func.count()).select_from(TelemetryObservation)) or 0
+    )
     inventory_counts = {
         "/services": (int(service_count), "services", "Tailscale Services"),
         "/routes": (
@@ -3086,6 +3395,7 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
         ),
         "/groups": (group_count, "policy", "policy groups"),
         "/tags": (tag_count, "device_inventory", "device tags"),
+        "/telemetry": (telemetry_count, "local_telemetry", "local telemetry observations"),
     }
     governance_names = {
         "credential_inventory",
@@ -3149,6 +3459,8 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
         evaluated = (
             governance_evaluated
             if path == "/security/governance"
+            else True
+            if path == "/telemetry"
             else bool(capability and capability.status == "available")
         )
         navigation[path] = {
@@ -3175,6 +3487,25 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
         }
         for c in rows
     ]
+    if "local_telemetry" not in capability_by_name:
+        configured = bool(get_settings().telemetry_secret)
+        items.append(
+            {
+                "name": "local_telemetry",
+                "status": "available"
+                if telemetry_count
+                else "unknown"
+                if configured
+                else "feature_disabled",
+                "source": "Optional local telemetry collector",
+                "requirement": "telemetry profile and TAILVIEW_TELEMETRY_SECRET",
+                "detail": "Normalized single-collector status and netcheck snapshots."
+                if telemetry_count
+                else "No valid collector observations have been received.",
+                "last_success": None,
+                "checked_at": datetime.now(UTC),
+            }
+        )
     if governance_rows:
         unavailable = {"permission_denied", "feature_disabled", "plan_unavailable", "unsupported"}
         aggregate_status = (
@@ -4641,19 +4972,180 @@ async def telemetry(
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Telemetry payload is too large"
         )
-    payload = json.loads(body)
-    observed = datetime.fromtimestamp(float(payload.get("observedAt", 0)), UTC)
-    collector = payload.get("status", {}).get("Self", {}).get("ID")
+    try:
+        decoded = json.loads(body)
+        if not isinstance(decoded, dict):
+            raise ValueError("Telemetry payload must be an object")
+        payload: dict[str, Any] = decoded
+        observed = datetime.fromtimestamp(float(payload.get("observedAt", 0)), UTC)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "Invalid telemetry payload") from exc
+    now = datetime.now(UTC)
+    if observed > now + timedelta(minutes=5) or observed < now - timedelta(hours=24):
+        raise HTTPException(422, "Telemetry observation time is outside the accepted window")
+    status_value = payload.get("status")
+    status_payload: dict[str, Any] = status_value if isinstance(status_value, dict) else {}
+    self_value = status_payload.get("Self")
+    self_payload: dict[str, Any] = self_value if isinstance(self_value, dict) else {}
+    netcheck_value = payload.get("netcheck")
+    netcheck: dict[str, Any] = netcheck_value if isinstance(netcheck_value, dict) else {}
+    collector = self_payload.get("ID")
+    collector_device = await db.get(Device, str(collector)) if collector else None
+    region_latency = netcheck.get("RegionLatency")
+    endpoints = self_payload.get("Endpoints", self_payload.get("TailscaleIPs", []))
     fingerprint = hashlib.sha256(body).hexdigest()
     if not await db.get(TelemetryObservation, fingerprint):
         db.add(
             TelemetryObservation(
                 id=fingerprint,
-                collector_node_id=collector,
+                collector_node_id=str(collector) if collector else None,
+                collector_device_id=collector_device.id if collector_device else None,
                 observed_at=observed,
                 scope="single_collector_node",
-                payload=payload,
+                payload={},
+                client_version=str(
+                    self_payload.get("TailscaleVersion") or status_payload.get("Version") or ""
+                ),
+                udp=netcheck.get("UDP") if isinstance(netcheck.get("UDP"), bool) else None,
+                ipv4=netcheck.get("IPv4") if isinstance(netcheck.get("IPv4"), bool) else None,
+                ipv6=netcheck.get("IPv6") if isinstance(netcheck.get("IPv6"), bool) else None,
+                mapping_varies_by_dest_ip=(
+                    netcheck.get("MappingVariesByDestIP")
+                    if isinstance(netcheck.get("MappingVariesByDestIP"), bool)
+                    else None
+                ),
+                preferred_derp=str(netcheck.get("PreferredDERP"))
+                if netcheck.get("PreferredDERP") is not None
+                else None,
+                endpoints=list(endpoints) if isinstance(endpoints, list) else [],
+                derp_latency=dict(region_latency) if isinstance(region_latency, dict) else {},
             )
         )
-        await db.commit()
+        db.add(
+            RawPayload(
+                id=hashlib.sha256(f"telemetry:{fingerprint}".encode()).hexdigest(),
+                source="local_telemetry",
+                schema_version="status-netcheck-v1",
+                payload=redact(payload),
+                retrieved_at=now,
+            )
+        )
+    capability = await db.get(Capability, "local_telemetry") or Capability(
+        name="local_telemetry", source="Optional local telemetry collector"
+    )
+    capability.status = "available"
+    capability.requirement = "telemetry profile and TAILVIEW_TELEMETRY_SECRET"
+    capability.detail = "A valid single-collector telemetry observation was received."
+    capability.last_success = now
+    capability.checked_at = now
+    db.add(capability)
+    await db.commit()
     return {"status": "accepted", "provenance": "local_telemetry"}
+
+
+@router.get("/telemetry/summary")
+async def telemetry_summary(_: Authed, db: Db) -> dict[str, Any]:
+    rows = (
+        await db.scalars(
+            select(TelemetryObservation).order_by(TelemetryObservation.observed_at.desc())
+        )
+    ).all()
+    latest: dict[str, TelemetryObservation] = {}
+    for row in rows:
+        key = row.collector_node_id or row.id
+        latest.setdefault(key, row)
+    labels = await device_label_map(db)
+    items = []
+    for row in latest.values():
+        item = _telemetry_item(row) or {}
+        item["collector_name"] = labels.get(
+            row.collector_device_id or "", row.collector_node_id or "Unmapped collector"
+        )
+        items.append(item)
+    capability = await db.get(Capability, "local_telemetry")
+    return {
+        "collectors": items,
+        "counts": {
+            "collectors": len(items),
+            "fresh": sum(not item["stale"] for item in items),
+            "stale": sum(bool(item["stale"]) for item in items),
+            "unmapped": sum(not item["collector_device_id"] for item in items),
+        },
+        "status": capability.status
+        if capability
+        else "feature_disabled"
+        if not get_settings().telemetry_secret
+        else "unknown",
+        "notice": (
+            "Local telemetry represents only each collector node at its observation time. "
+            "It is never a tailnet-wide live view."
+        ),
+    }
+
+
+@router.get("/telemetry/observations")
+async def telemetry_observations(
+    _: Authed,
+    db: Db,
+    collector: str = "",
+    hours: int = Query(24),
+    freshness: str = "",
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    if hours not in {1, 24, 168, 720}:
+        raise HTTPException(422, "hours must be one of 1, 24, 168, or 720")
+    if freshness not in {"", "fresh", "stale"}:
+        raise HTTPException(422, "Unsupported freshness filter")
+    now = datetime.now(UTC)
+    query = select(TelemetryObservation).where(
+        TelemetryObservation.observed_at >= now - timedelta(hours=hours)
+    )
+    if collector:
+        query = query.where(
+            or_(
+                TelemetryObservation.collector_node_id == collector,
+                TelemetryObservation.collector_device_id == collector,
+            )
+        )
+    stale_cutoff = now - timedelta(minutes=5)
+    if freshness == "fresh":
+        query = query.where(TelemetryObservation.observed_at >= stale_cutoff)
+    elif freshness == "stale":
+        query = query.where(TelemetryObservation.observed_at < stale_cutoff)
+    cursor_data = decode_cursor(cursor, "telemetry")
+    if cursor_data:
+        observed = datetime.fromisoformat(str(cursor_data["observed_at"]))
+        row_id = str(cursor_data["id"])
+        query = query.where(
+            or_(
+                TelemetryObservation.observed_at < observed,
+                and_(
+                    TelemetryObservation.observed_at == observed, TelemetryObservation.id < row_id
+                ),
+            )
+        )
+    rows = (
+        await db.scalars(
+            query.order_by(
+                TelemetryObservation.observed_at.desc(), TelemetryObservation.id.desc()
+            ).limit(limit + 1)
+        )
+    ).all()
+    page = rows[:limit]
+    next_cursor = (
+        encode_cursor(
+            "telemetry", {"observed_at": page[-1].observed_at.isoformat(), "id": page[-1].id}
+        )
+        if len(rows) > limit and page
+        else None
+    )
+    labels = await device_label_map(db)
+    items = []
+    for row in page:
+        item = _telemetry_item(row) or {}
+        item["collector_name"] = labels.get(
+            row.collector_device_id or "", row.collector_node_id or "Unmapped collector"
+        )
+        items.append(item)
+    return {"items": items, "next_cursor": next_cursor}

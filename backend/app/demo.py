@@ -15,6 +15,7 @@ from .models import (
     CleanupRun,
     Device,
     DeviceConnectivity,
+    DeviceHistoryEvent,
     DeviceInvite,
     DevicePostureAttribute,
     DevicePostureState,
@@ -24,6 +25,7 @@ from .models import (
     FindingTransition,
     Flow,
     FlowAggregateState,
+    LocalMetadata,
     LogStreamingConfiguration,
     OperationalJobRun,
     OperationalJobState,
@@ -40,6 +42,7 @@ from .models import (
     TailnetSecuritySettings,
     TailnetService,
     TailnetUser,
+    TelemetryObservation,
     WebhookEndpoint,
 )
 
@@ -453,6 +456,75 @@ async def seed_demo(session: AsyncSession) -> None:
     ]
     session.add_all(devices)
     await session.flush()
+    session.add(
+        LocalMetadata(
+            device_id="n-api",
+            display_name="Production API",
+            description="Customer-facing API workload; synthetic local metadata.",
+            functional_groups=["production", "customer-facing"],
+            custom_roles=["critical_workload"],
+            primary_role_override="critical_workload",
+            environment="production",
+            location="Amsterdam",
+            criticality="critical",
+            default_map_visible=True,
+        )
+    )
+    session.add_all(
+        [
+            DeviceHistoryEvent(
+                device_id="n-api",
+                event_type="inventory_changed",
+                source="device_sync",
+                changed_fields=["version"],
+                before={"version": "1.82.5"},
+                after={"version": "1.84.0"},
+                occurred_at=now - timedelta(days=2),
+            ),
+            DeviceHistoryEvent(
+                device_id="n-api",
+                event_type="metadata_changed",
+                source="local_metadata",
+                changed_fields=["criticality"],
+                before={"criticality": "high"},
+                after={"criticality": "critical"},
+                occurred_at=now - timedelta(hours=8),
+            ),
+            TelemetryObservation(
+                id="demo-telemetry-current",
+                collector_node_id="n-laptop",
+                collector_device_id="n-laptop",
+                observed_at=now - timedelta(minutes=1),
+                scope="single_collector_node",
+                payload={"demo": True},
+                client_version="1.84.0",
+                udp=True,
+                ipv4=True,
+                ipv6=True,
+                mapping_varies_by_dest_ip=False,
+                preferred_derp="ams",
+                endpoints=["192.0.2.10:41641"],
+                derp_latency={"ams": 0.012, "fra": 0.021},
+                received_at=now,
+            ),
+            TelemetryObservation(
+                id="demo-telemetry-stale",
+                collector_node_id="unmapped-demo-node",
+                observed_at=now - timedelta(hours=3),
+                scope="single_collector_node",
+                payload={"demo": True},
+                client_version="1.83.2",
+                udp=False,
+                ipv4=True,
+                ipv6=False,
+                mapping_varies_by_dest_ip=True,
+                preferred_derp="fra",
+                endpoints=[],
+                derp_latency={"fra": 0.044},
+                received_at=now - timedelta(hours=3),
+            ),
+        ]
+    )
     for demo_device in devices:
         session.add(
             DevicePostureState(
@@ -864,11 +936,11 @@ async def seed_demo(session: AsyncSession) -> None:
         session.add(
             Capability(
                 name=name,
-                status="available" if name != "local_telemetry" else "feature_disabled",
+                status="available",
                 source="Synthetic demo fixture",
                 requirement=requirement,
                 detail="Synthetic data; never mixed with real tailnet data",
-                last_success=now if name != "local_telemetry" else None,
+                last_success=now,
             )
         )
     operation_jobs = [

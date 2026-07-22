@@ -125,7 +125,7 @@ describe("network reports", () => {
       throw new Error(`Unexpected request ${path}`);
     });
     renderReports("administrator");
-    fireEvent.click(await screen.findByRole("button", { name: "Schedules" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Schedules" }));
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByLabelText("Ranking size"), { target: { value: "20" } });
     fireEvent.click(screen.getByRole("button", { name: "Save schedule" }));

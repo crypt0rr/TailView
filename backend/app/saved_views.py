@@ -86,6 +86,7 @@ class TopologyViewState(ViewState):
     search: str = Field(default="", max_length=255)
     observed: bool = False
     permitted: bool = False
+    mode: Literal["graph", "table"] = "graph"
 
 
 class FindingViewState(ViewState):
