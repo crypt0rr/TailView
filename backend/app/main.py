@@ -63,6 +63,7 @@ async def request_context(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
     correlation_id = request.headers.get("x-correlation-id", str(uuid.uuid4()))[:128]
+    request.state.correlation_id = correlation_id
     started = time.monotonic()
     try:
         response = await call_next(request)

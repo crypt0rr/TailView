@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useInfiniteQuery,
   useMutation,
@@ -21,13 +21,16 @@ import {
   Scan,
   GitCompareArrows,
   KeyRound,
+  Laptop,
   List,
+  LockKeyhole,
   Maximize2,
   Network,
   RefreshCw,
   Search,
   ShieldCheck,
   SlidersHorizontal,
+  UserPlus,
   Users,
   X,
   Zap,
@@ -48,6 +51,7 @@ import {
   YAxis,
 } from "recharts";
 import { request } from "./api";
+import { SavedViews } from "./savedViews";
 import { useTimeRange } from "./timeRange";
 import {
   Badge,
@@ -64,6 +68,7 @@ import {
 } from "./components";
 import type {
   AddressInventory,
+  AppSession,
   Device,
   DnsConfiguration,
   FlowRecord,
@@ -78,6 +83,7 @@ import type {
   ServiceDetail,
   ServiceSummary,
   SecurityPostureSummary,
+  TailViewAccount,
   TopologyData,
 } from "./types";
 
@@ -259,8 +265,29 @@ export function Findings({ user }: { user: FindingsUser }) {
   const [newSecret, setNewSecret] = useState("");
   const [suppressionDuration, setSuppressionDuration] = useState("24h");
   const queryClient = useQueryClient();
-  const filterKeys = ["status", "severity", "source", "category", "subject", "assigned_to", "search"] as const;
+  const filterKeys = useMemo(
+    () => ["status", "severity", "source", "category", "subject", "assigned_to", "search"] as const,
+    [],
+  );
   const filters = Object.fromEntries(filterKeys.map((key) => [key, params.get(key) ?? ""]));
+  const findingViewState = useMemo(() => ({
+    status: filters.status, severity: filters.severity, source: filters.source,
+    category: filters.category, subject: filters.subject,
+    assigned_to: filters.assigned_to, search: filters.search,
+  }), [filters.assigned_to, filters.category, filters.search, filters.severity, filters.source, filters.status, filters.subject]);
+  const applyFindingView = useCallback((state: Record<string, unknown>) => {
+    setSelectedId("");
+    setParams((current) => {
+      const next = new URLSearchParams(current);
+      filterKeys.forEach((key) => {
+        const value = String(state[key] ?? "");
+        if (value) next.set(key, value); else next.delete(key);
+      });
+      next.delete("finding");
+      return next;
+    });
+  }, [filterKeys, setParams]);
+  const findingHasExplicitState = filterKeys.some((key) => params.has(key));
   const setFilter = (key: string, value: string) => setParams((current) => {
     const next = new URLSearchParams(current);
     if (value) next.set(key, value); else next.delete(key);
@@ -355,6 +382,7 @@ export function Findings({ user }: { user: FindingsUser }) {
   const promptReason = (label: string) => window.prompt(`${label} reason (optional)`, "") ?? null;
   return <div className="page findings-page">
     <PageHead eyebrow="SECURITY & OPERATIONS" title="Findings" description="Durable signals with recurrence, acknowledgement, suppression, and resolution history." actions={<Badge tone={totals.open ? "warning" : "success"}>{totals.open} active</Badge>} />
+    <SavedViews page="findings" state={findingViewState} builtIn={{ status: "", severity: "", source: "", category: "", subject: "", assigned_to: "", search: "" }} apply={applyFindingView} hasExplicitState={findingHasExplicitState} />
     {user.role === "administrator" && <div className="tabs" role="tablist" aria-label="Findings workspace"><button className={tab === "findings" ? "active" : ""} onClick={() => setTab("findings")}>Findings</button><button className={tab === "notifications" ? "active" : ""} onClick={() => setTab("notifications")}>Notifications</button></div>}
     {tab === "findings" && <>
       <div className="posture-metrics findings-metrics">
@@ -510,10 +538,27 @@ type GovernanceStream = {
 };
 
 export function AccessGovernance() {
-  const [tab, setTab] = useState<"credentials" | "invites" | "contacts" | "streams">("credentials");
-  const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTab] = useState<"credentials" | "invites" | "contacts" | "streams">((searchParams.get("tab") as "credentials" | "invites" | "contacts" | "streams") ?? "credentials");
+  const [search, setSearch] = useState(searchParams.get("search") ?? "");
+  const [typeFilter, setTypeFilter] = useState(searchParams.get("credential_type") ?? "");
+  const [statusFilter, setStatusFilter] = useState(searchParams.get("status") ?? "");
+  const governanceViewState = useMemo(() => ({ tab, search, credential_type: typeFilter, status: statusFilter }), [search, statusFilter, tab, typeFilter]);
+  const applyGovernanceView = useCallback((state: Record<string, unknown>) => {
+    const nextTab = String(state.tab ?? "credentials") as "credentials" | "invites" | "contacts" | "streams";
+    const values = { search: String(state.search ?? ""), credential_type: String(state.credential_type ?? ""), status: String(state.status ?? "") };
+    setTab(nextTab); setSearch(values.search); setTypeFilter(values.credential_type); setStatusFilter(values.status);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (nextTab !== "credentials") next.set("tab", nextTab); else next.delete("tab");
+      Object.entries(values).forEach(([key, value]) => { if (value) next.set(key, value); else next.delete(key); });
+      return next;
+    });
+  }, [setSearchParams]);
+  const governanceHasExplicitState = ["tab", "search", "credential_type", "status"].some((key) => searchParams.has(key));
+  const setGovernanceFilter = (key: string, value: string) => setSearchParams((current) => {
+    const next = new URLSearchParams(current); if (value) next.set(key, value); else next.delete(key); return next;
+  });
   const summary = useQuery({
     queryKey: ["access-governance"],
     queryFn: () => request<GovernanceSummary>("/security/governance"),
@@ -555,18 +600,19 @@ export function AccessGovernance() {
   ];
   return <div className="page">
     <PageHead eyebrow="SECURITY" title="Access governance" description="Read-only credential, invitation, contact, and log-stream metadata. Secret values are never requested." actions={<Badge tone={data.findings.some((item) => item.severity === "high") ? "danger" : "success"}>{data.findings.length} findings</Badge>} />
+    <SavedViews page="access_governance" state={governanceViewState} builtIn={{ tab: "credentials", search: "", credential_type: "", status: "" }} apply={applyGovernanceView} hasExplicitState={governanceHasExplicitState} />
     <div className="posture-metrics">{metrics.map(([label, value]) => <Card className="posture-metric" key={String(label)}><span>{label}</span><strong>{value}</strong></Card>)}</div>
     <div className="notice-bar warning"><AlertTriangle /><span>{data.limitations.join(" ")}</span></div>
     <Card className="table-card posture-findings">
       <CardHead title="Conservative findings" detail="Reported metadata requiring administrator review" />
       {data.findings.length ? <div className="security-findings governance-findings">{data.findings.map((finding) => <div className={`security-finding ${finding.severity}`} key={finding.id}><div className="security-finding-head"><div><Badge tone={finding.severity === "high" ? "danger" : "warning"}>{finding.severity}</Badge><span>{finding.kind.replaceAll("_", " ")}</span></div><code>{finding.label}</code></div><strong>{finding.message}</strong><p>{finding.remediation}</p></div>)}</div> : <Empty title="No governance findings" detail="No patterns covered by the conservative review were reported." />}
     </Card>
-    <div className="tabs" role="tablist" aria-label="Governance inventory">{(["credentials", "invites", "contacts", "streams"] as const).map((value) => <button key={value} role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{value === "streams" ? "Log streaming" : value}</button>)}</div>
+    <div className="tabs" role="tablist" aria-label="Governance inventory">{(["credentials", "invites", "contacts", "streams"] as const).map((value) => <button key={value} role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => { setTab(value); setGovernanceFilter("tab", value === "credentials" ? "" : value); }}>{value === "streams" ? "Log streaming" : value}</button>)}</div>
     {tab === "credentials" && <>
       <div className="filters-bar governance-filters">
-        <label className="search-field"><Search /><input aria-label="Search credentials" placeholder="Search description, creator, scope…" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
-        <select aria-label="Credential type" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option value="">All types</option><option value="auth_key">Auth keys</option><option value="api_access_token">API access tokens</option><option value="oauth_credential">OAuth credentials</option><option value="federated_credential">Federated credentials</option></select>
-        <select aria-label="Credential status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option><option value="active">Active</option><option value="expired">Expired</option><option value="revoked">Revoked</option><option value="stale">Stale</option><option value="inactive">Inactive</option></select>
+        <label className="search-field"><Search /><input aria-label="Search credentials" placeholder="Search description, creator, scope…" value={search} onChange={(event) => { setSearch(event.target.value); setGovernanceFilter("search", event.target.value); }} /></label>
+        <select aria-label="Credential type" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setGovernanceFilter("credential_type", event.target.value); }}><option value="">All types</option><option value="auth_key">Auth keys</option><option value="api_access_token">API access tokens</option><option value="oauth_credential">OAuth credentials</option><option value="federated_credential">Federated credentials</option></select>
+        <select aria-label="Credential status" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setGovernanceFilter("status", event.target.value); }}><option value="">All statuses</option><option value="active">Active</option><option value="expired">Expired</option><option value="revoked">Revoked</option><option value="stale">Stale</option><option value="inactive">Inactive</option></select>
       </div>
       <Card className="table-card"><div className="table-scroll"><table><thead><tr><th>Credential</th><th>Type</th><th>Status</th><th>Scopes / tags</th><th>Expires</th><th>Properties</th></tr></thead><tbody>{credentialRows.map((row) => <tr key={row.id}><td><strong>{row.description || "Unnamed credential"}</strong><small className="block"><code>{row.display_id}</code>{row.creator_id ? ` · ${row.creator_id}` : ""}</small></td><td>{row.type.replaceAll("_", " ")}</td><td><Badge tone={row.status === "active" ? "success" : row.status === "expired" || row.status === "revoked" ? "danger" : "warning"}>{row.status}</Badge></td><td><div className="tag-list">{[...row.scopes, ...row.tags].map((value) => <code key={value}>{value}</code>)}</div></td><td>{row.expires_at ? <><strong>{new Date(row.expires_at).toLocaleDateString()}</strong><small className="block">{relativeTime(row.expires_at)}</small></> : "Not reported"}</td><td><div className="tag-list">{row.reusable === true && <Badge tone="warning">reusable</Badge>}{row.ephemeral === true && <Badge>ephemeral</Badge>}{row.preapproved === true && <Badge>pre-approved</Badge>}</div></td></tr>)}</tbody></table></div>{!credentials.isLoading && !credentialRows.length && <Empty title="No credentials reported" detail={`Capability: ${capabilityStatus("credentials")}`} />}{credentials.hasNextPage && <div className="load-more"><Button variant="secondary" onClick={() => credentials.fetchNextPage()} disabled={credentials.isFetchingNextPage}>{credentials.isFetchingNextPage ? "Loading…" : "Load more"}</Button></div>}</Card>
     </>}
@@ -596,6 +642,27 @@ export function SecurityPosture() {
   const [osFilter, setOsFilter] = useState(searchParams.get("os") ?? "");
   const [expiryFilter, setExpiryFilter] = useState(searchParams.get("expiry") ?? "");
   const [staleFilter, setStaleFilter] = useState(searchParams.get("stale") ?? "");
+  const postureViewState = useMemo(() => ({
+    result: resultFilter, posture: postureNameFilter, attribute: attributeFilter,
+    owner: ownerFilter, os: osFilter, expiry: expiryFilter, stale: staleFilter,
+  }), [attributeFilter, expiryFilter, osFilter, ownerFilter, postureNameFilter, resultFilter, staleFilter]);
+  const applyPostureView = useCallback((state: Record<string, unknown>) => {
+    const values = {
+      result: String(state.result ?? ""), posture: String(state.posture ?? ""),
+      attribute: String(state.attribute ?? ""), owner: String(state.owner ?? ""),
+      os: String(state.os ?? ""), expiry: String(state.expiry ?? ""),
+      stale: String(state.stale ?? ""),
+    };
+    setResultFilter(values.result); setPostureNameFilter(values.posture);
+    setAttributeFilter(values.attribute); setOwnerFilter(values.owner);
+    setOsFilter(values.os); setExpiryFilter(values.expiry); setStaleFilter(values.stale);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      Object.entries(values).forEach(([key, value]) => { if (value) next.set(key, value); else next.delete(key); });
+      return next;
+    });
+  }, [setSearchParams]);
+  const postureHasExplicitState = ["result", "posture", "attribute", "owner", "os", "expiry", "stale"].some((key) => searchParams.has(key));
   const updateFilter = (key: string, value: string) => {
     if (key === "result") setResultFilter(value);
     if (key === "attribute") setAttributeFilter(value);
@@ -661,6 +728,7 @@ export function SecurityPosture() {
         description="Current policy evaluated against typed, device-reported posture evidence."
         actions={<Badge tone={data.capability.status === "available" ? "success" : "warning"}>{data.capability.status.replaceAll("_", " ")}</Badge>}
       />
+      <SavedViews page="security_posture" state={postureViewState} builtIn={{ result: "", posture: "", attribute: "", owner: "", os: "", expiry: "", stale: "" }} apply={applyPostureView} hasExplicitState={postureHasExplicitState} />
       <div className="posture-metrics">
         {metrics.map(([label, value]) => (
           <Card className="posture-metric" key={String(label)}>
@@ -768,7 +836,31 @@ export function Devices({ role = "" }: { role?: string }) {
       return {};
     }
   });
+  const builtInColumns = useRef(columns);
   const [selected, setSelected] = useState<Device | null>(null);
+  const deviceViewPage = role === "exit_node" ? "exit_nodes" : role === "subnet_router" ? "subnet_routers" : "devices";
+  const deviceViewState = useMemo(() => ({
+    search, status: statusFilter, owner, key_expiry: keyExpiryFilter,
+    posture: postureFilter, columns,
+  }), [columns, keyExpiryFilter, owner, postureFilter, search, statusFilter]);
+  const applyDeviceView = useCallback((state: Record<string, unknown>) => {
+    const values = {
+      search: String(state.search ?? ""), status: String(state.status ?? ""),
+      owner: String(state.owner ?? ""), key_expiry: String(state.key_expiry ?? ""),
+      posture: String(state.posture ?? ""),
+    };
+    setSearch(values.search); setStatusFilter(values.status); setOwner(values.owner);
+    setKeyExpiryFilter(values.key_expiry); setPostureFilter(values.posture);
+    setColumns((state.columns as Record<string, boolean> | undefined) ?? builtInColumns.current);
+    setSelected(null);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      Object.entries(values).forEach(([key, value]) => { if (value) next.set(key, value); else next.delete(key); });
+      next.delete("device");
+      return next;
+    });
+  }, [setSearchParams]);
+  const deviceHasExplicitState = ["search", "status", "owner", "key_expiry", "posture"].some((key) => searchParams.has(key));
   const deviceParams = useMemo(() => {
     const params = new URLSearchParams({ search, role });
     if (statusFilter) params.set("status", statusFilter);
@@ -846,7 +938,10 @@ export function Devices({ role = "" }: { role?: string }) {
   const toggleColumn = (column: string) => {
     const next = { ...columns, [column]: columns[column] === false };
     setColumns(next);
-    localStorage.setItem("tailview.deviceColumns", JSON.stringify(next));
+    if (!searchParams.get("view") || searchParams.get("view") === "builtin") {
+      localStorage.setItem("tailview.deviceColumns", JSON.stringify(next));
+      builtInColumns.current = next;
+    }
   };
   const exportUrl = `/api/v1/devices/export.csv?${deviceParams}`;
   return (
@@ -861,6 +956,7 @@ export function Devices({ role = "" }: { role?: string }) {
           </a>
         }
       />
+      <SavedViews page={deviceViewPage} state={deviceViewState} builtIn={{ search: "", status: "", owner: "", key_expiry: "", posture: "", columns: builtInColumns.current }} apply={applyDeviceView} hasExplicitState={deviceHasExplicitState} />
       <div className="toolbar inventory-toolbar">
         <label className="search-field">
           <Search />
@@ -1096,12 +1192,34 @@ function KeyExpiryCell({ value, disabled }: { value: string | null; disabled: bo
 }
 
 export function Topology() {
-  const { hours } = useTimeRange();
+  const { hours, range, setRange } = useTimeRange();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [selected, setSelected] = useState<Device | ServiceSummary | null>(null);
-  const [showPolicy, setShowPolicy] = useState(false);
-  const [showObserved, setShowObserved] = useState(false);
-  const [layout, setLayout] = useState("cose");
-  const [search, setSearch] = useState("");
+  const [showPolicy, setShowPolicy] = useState(searchParams.get("permitted") === "true");
+  const [showObserved, setShowObserved] = useState(searchParams.get("observed") === "true");
+  const [layout, setLayout] = useState(searchParams.get("layout") ?? "cose");
+  const [search, setSearch] = useState(searchParams.get("search") ?? "");
+  const topologyViewState = useMemo(() => ({
+    range, layout, search, observed: showObserved, permitted: showPolicy,
+  }), [layout, range, search, showObserved, showPolicy]);
+  const applyTopologyView = useCallback((state: Record<string, unknown>) => {
+    const nextRange = String(state.range ?? "24h") as "1h" | "24h" | "7d" | "30d";
+    const nextLayout = String(state.layout ?? "cose");
+    const nextSearch = String(state.search ?? "");
+    setRange(nextRange); setLayout(nextLayout); setSearch(nextSearch);
+    setShowObserved(Boolean(state.observed)); setShowPolicy(Boolean(state.permitted));
+    setSelected(null);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set("range", nextRange); next.set("layout", nextLayout);
+      if (nextSearch) next.set("search", nextSearch); else next.delete("search");
+      if (state.observed) next.set("observed", "true"); else next.delete("observed");
+      if (state.permitted) next.set("permitted", "true"); else next.delete("permitted");
+      next.delete("node");
+      return next;
+    });
+  }, [setRange, setSearchParams]);
+  const topologyHasExplicitState = ["range", "layout", "search", "observed", "permitted"].some((key) => searchParams.has(key));
   const query = useQuery({
     queryKey: ["topology", hours],
     queryFn: () => request<TopologyData>(`/topology?hours=${hours}`),
@@ -1236,6 +1354,7 @@ export function Topology() {
           title="Topology"
           description="Observed traffic and current policy are separate layers."
         />
+        <SavedViews page="topology" state={topologyViewState} builtIn={{ range: "24h", layout: "cose", search: "", observed: false, permitted: false }} apply={applyTopologyView} hasExplicitState={topologyHasExplicitState} />
         <div className="topology-tools">
           <label className="search-field">
             <Search />
@@ -1785,7 +1904,7 @@ function FlowSummary({ flows }: { flows: any[] }) {
 }
 
 export function Flows() {
-  const { hours } = useTimeRange();
+  const { hours, range, setRange } = useTimeRange();
   const [searchParams, setSearchParams] = useSearchParams();
   const [category, setCategory] = useState(searchParams.get("category") ?? "");
   const [source, setSource] = useState(searchParams.get("source") ?? "");
@@ -1797,6 +1916,31 @@ export function Flows() {
   const [showFilters, setShowFilters] = useState(
     Boolean(source || destination || protocol || port || resolution !== "all"),
   );
+  const flowViewState = useMemo(() => ({
+    range, category, source, destination, protocol, port, resolution,
+    ranking_limit: rankingLimit,
+  }), [category, destination, port, protocol, range, rankingLimit, resolution, source]);
+  const applyFlowView = useCallback((state: Record<string, unknown>) => {
+    const values = {
+      category: String(state.category ?? ""), source: String(state.source ?? ""),
+      destination: String(state.destination ?? ""), protocol: String(state.protocol ?? ""),
+      port: String(state.port ?? ""), resolution: String(state.resolution ?? "all"),
+    };
+    const nextRange = String(state.range ?? "24h") as "1h" | "24h" | "7d" | "30d";
+    setRange(nextRange); setCategory(values.category); setSource(values.source);
+    setDestination(values.destination); setProtocol(values.protocol); setPort(values.port);
+    setResolution(values.resolution); setRankingLimit(Number(state.ranking_limit ?? 10));
+    setShowFilters(Boolean(values.source || values.destination || values.protocol || values.port || values.resolution !== "all"));
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set("range", nextRange);
+      Object.entries(values).forEach(([key, value]) => {
+        if (value && value !== "all") next.set(key, value); else next.delete(key);
+      });
+      return next;
+    });
+  }, [setRange, setSearchParams]);
+  const flowHasExplicitState = ["range", "category", "source", "destination", "protocol", "port", "resolution"].some((key) => searchParams.has(key));
   const filterParams = useMemo(() => {
     const params = new URLSearchParams({ hours: String(hours) });
     if (category) params.set("category", category);
@@ -1863,6 +2007,7 @@ export function Flows() {
           </a>
         }
       />
+      <SavedViews page="flows" state={flowViewState} builtIn={{ range: "24h", category: "", source: "", destination: "", protocol: "", port: "", resolution: "all", ranking_limit: 10 }} apply={applyFlowView} hasExplicitState={flowHasExplicitState} />
       <div className="notice-bar">
         <AlertTriangle />
         <span>
@@ -2475,6 +2620,17 @@ export function Services() {
   const [statusFilter, setStatusFilter] = useState(searchParams.get("status") ?? "");
   const [host, setHost] = useState(searchParams.get("host") ?? "");
   const [selected, setSelected] = useState<ServiceSummary | null>(null);
+  const serviceViewState = useMemo(() => ({ search, status: statusFilter, host }), [host, search, statusFilter]);
+  const applyServiceView = useCallback((state: Record<string, unknown>) => {
+    const values = { search: String(state.search ?? ""), status: String(state.status ?? ""), host: String(state.host ?? "") };
+    setSearch(values.search); setStatusFilter(values.status); setHost(values.host); setSelected(null);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      Object.entries(values).forEach(([key, value]) => { if (value) next.set(key, value); else next.delete(key); });
+      return next;
+    });
+  }, [setSearchParams]);
+  const serviceHasExplicitState = ["search", "status", "host"].some((key) => searchParams.has(key));
   const query = useInfiniteQuery({
     queryKey: ["services", search, statusFilter, host],
     initialPageParam: null as string | null,
@@ -2499,6 +2655,7 @@ export function Services() {
   return (
     <div className="page">
       <PageHead eyebrow="TAILSCALE SERVICES" title="Services" description="Read-only Service inventory, hosting devices, endpoints, and policy references." />
+      <SavedViews page="services" state={serviceViewState} builtIn={{ search: "", status: "", host: "" }} apply={applyServiceView} hasExplicitState={serviceHasExplicitState} />
       <div className="toolbar inventory-toolbar">
         <label className="search-field"><Search /><input value={search} placeholder="Search Services…" onChange={(event) => { setSearch(event.target.value); updateFilter("search", event.target.value); }} /></label>
         <select aria-label="Service status filter" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); updateFilter("status", event.target.value); }}>
@@ -2807,6 +2964,154 @@ export function DnsSettings() {
   );
 }
 
+export function AccountSecurity({ user }: { user: { username: string; role: string; mfa_enabled: boolean; mfa_required: boolean } }) {
+  const qc = useQueryClient();
+  const sessions = useQuery({
+    queryKey: ["own-sessions"],
+    queryFn: () => request<{ items: AppSession[] }>("/auth/sessions"),
+  });
+  const [passwords, setPasswords] = useState({ current: "", next: "" });
+  const [mfaPassword, setMfaPassword] = useState("");
+  const [mfaSecret, setMfaSecret] = useState("");
+  const [mfaCode, setMfaCode] = useState("");
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const run = async (operation: () => Promise<unknown>, success: string) => {
+    setError(""); setMessage("");
+    try { await operation(); setMessage(success); await qc.invalidateQueries(); }
+    catch (err) { setError(err instanceof Error ? err.message : "Request failed"); }
+  };
+  const changePassword = (event: React.FormEvent) => {
+    event.preventDefault();
+    void run(() => request("/auth/password", { method: "POST", body: JSON.stringify({ current_password: passwords.current, new_password: passwords.next }) }), "Password updated and other sessions revoked.");
+    setPasswords({ current: "", next: "" });
+  };
+  const revoke = async (session: AppSession) => {
+    if (!window.confirm(session.current ? "Revoke this session and sign out?" : "Revoke this session?")) return;
+    const result = await request<{ logged_out: boolean }>(`/auth/sessions/${session.id}`, { method: "DELETE" });
+    if (result.logged_out) window.location.assign("/");
+    else await sessions.refetch();
+  };
+  const startMfa = (event: React.FormEvent) => {
+    event.preventDefault();
+    void run(async () => {
+      const result = await request<{ secret: string }>("/auth/mfa/enroll", { method: "POST", body: JSON.stringify({ password: mfaPassword }) });
+      setMfaSecret(result.secret); setMfaPassword("");
+    }, "Add the secret to your authenticator, then confirm a code.");
+  };
+  const confirmMfa = (event: React.FormEvent) => {
+    event.preventDefault();
+    void run(async () => {
+      const result = await request<{ recovery_codes: string[] }>("/auth/mfa/confirm", { method: "POST", body: JSON.stringify({ code: mfaCode }) });
+      setRecoveryCodes(result.recovery_codes); setMfaCode(""); setMfaSecret("");
+    }, "Multi-factor authentication enabled.");
+  };
+  const disableMfa = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!window.confirm("Disable multi-factor authentication for this account?")) return;
+    void run(() => request("/auth/mfa/disable", { method: "POST", body: JSON.stringify({ password: mfaPassword }) }), "Multi-factor authentication disabled.");
+    setMfaPassword("");
+  };
+  return <div className="page">
+    <PageHead eyebrow="TAILVIEW ACCESS" title="Account security" description="Manage your local TailView password, multi-factor authentication, and signed-in sessions." />
+    {(message || error) && <div className={`notice ${error ? "warning" : "success"}`}>{error || message}</div>}
+    <div className="settings-grid">
+      <Card className="settings-card">
+        <CardHead title="Password" detail="Changing it revokes every other session." />
+        <form className="stack-form" onSubmit={changePassword}>
+          <label>Current password<input type="password" autoComplete="current-password" value={passwords.current} onChange={(e) => setPasswords({ ...passwords, current: e.target.value })} required /></label>
+          <label>New password<input type="password" autoComplete="new-password" minLength={12} value={passwords.next} onChange={(e) => setPasswords({ ...passwords, next: e.target.value })} required /></label>
+          <Button type="submit"><LockKeyhole /> Change password</Button>
+        </form>
+      </Card>
+      <Card className="settings-card">
+        <CardHead title="Multi-factor authentication" detail={user.mfa_required ? "Required for your role." : "Optional authenticator protection."} />
+        <div className="setting-row"><strong>Status</strong><Badge tone={user.mfa_enabled ? "success" : user.mfa_required ? "warning" : "neutral"}>{user.mfa_enabled ? "Enabled" : "Not enabled"}</Badge></div>
+        {!user.mfa_enabled && !mfaSecret && <form className="stack-form" onSubmit={startMfa}><label>Current password<input type="password" value={mfaPassword} onChange={(e) => setMfaPassword(e.target.value)} required /></label><Button type="submit"><ShieldCheck /> Enroll authenticator</Button></form>}
+        {mfaSecret && <form className="stack-form" onSubmit={confirmMfa}><p>Add this secret to your authenticator:</p><code className="enrollment-secret">{mfaSecret}</code><label>Authenticator code<input autoComplete="one-time-code" value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} required /></label><Button type="submit">Confirm enrollment</Button></form>}
+        {user.mfa_enabled && <form className="stack-form" onSubmit={disableMfa}><label>Current password<input type="password" value={mfaPassword} onChange={(e) => setMfaPassword(e.target.value)} required /></label><Button className="danger" type="submit">Disable MFA</Button></form>}
+        {user.mfa_enabled && <Button className="secondary" onClick={() => void run(async () => {
+          const result = await request<{ recovery_codes: string[] }>("/auth/mfa/recovery-codes", { method: "POST", body: JSON.stringify({ password: mfaPassword }) });
+          setRecoveryCodes(result.recovery_codes); setMfaPassword("");
+        }, "New recovery codes generated; previous codes are no longer valid.")}>Generate new recovery codes</Button>}
+        {recoveryCodes.length > 0 && <div className="recovery-panel"><strong>Save these recovery codes now</strong><p>Each code works once and cannot be shown again.</p><div className="recovery-codes">{recoveryCodes.map((code) => <code key={code}>{code}</code>)}</div><Button className="secondary" onClick={() => setRecoveryCodes([])}>I saved them</Button></div>}
+      </Card>
+      <Card className="settings-card full">
+        <CardHead title="Your sessions" detail="Source addresses and browser descriptions are security evidence, not identity claims." action={<Button className="secondary" onClick={() => void run(() => request("/auth/sessions/revoke-others", { method: "POST" }), "Other sessions revoked.")}>Revoke other sessions</Button>} />
+        {sessions.isLoading ? <Loading /> : sessions.error ? <ErrorState error={sessions.error} /> : <div className="session-list">{sessions.data?.items.map((session) => <div className="session-row" key={session.id}><Laptop /><div><strong>{session.user_agent}</strong><p>{session.last_ip} · Last active {relativeTime(session.last_seen_at)}</p><small>Expires {new Date(session.expires_at).toLocaleString()}</small></div><div>{session.current && <Badge tone="success">Current</Badge>}{session.revoked_at ? <Badge tone="neutral">Revoked</Badge> : <Button className="ghost" onClick={() => void revoke(session)}>Revoke</Button>}</div></div>)}</div>}
+      </Card>
+    </div>
+  </div>;
+}
+
+export function TailViewAccess() {
+  const qc = useQueryClient();
+  const [accountSearch, setAccountSearch] = useState("");
+  const [sessionSearch, setSessionSearch] = useState("");
+  const accounts = useInfiniteQuery({
+    queryKey: ["app-users", accountSearch], initialPageParam: "",
+    queryFn: ({ pageParam }) => request<Page<TailViewAccount>>(`/settings/app-users?search=${encodeURIComponent(accountSearch)}${pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : ""}`),
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+  });
+  const sessions = useInfiniteQuery({
+    queryKey: ["app-sessions", sessionSearch], initialPageParam: "",
+    queryFn: ({ pageParam }) => request<Page<AppSession>>(`/settings/app-sessions?active=true&search=${encodeURIComponent(sessionSearch)}${pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : ""}`),
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+  });
+  const policy = useQuery({ queryKey: ["auth-policy"], queryFn: () => request<{ required_roles: string[] }>("/settings/auth-policy") });
+  const events = useQuery({ queryKey: ["auth-events"], queryFn: () => request<Page<any>>("/settings/auth-events?limit=25") });
+  const [form, setForm] = useState({ username: "", display_name: "", role: "viewer", temporary_password: "" });
+  const [error, setError] = useState("");
+  const mutate = async (path: string, options: RequestInit, confirmation?: string) => {
+    if (confirmation && !window.confirm(confirmation)) return;
+    setError("");
+    try { const result = await request<{ logged_out?: boolean }>(path, options); await qc.invalidateQueries(); if (result.logged_out) window.location.assign("/"); }
+    catch (err) { setError(err instanceof Error ? err.message : "Request failed"); }
+  };
+  const createAccount = (event: React.FormEvent) => {
+    event.preventDefault();
+    void mutate("/settings/app-users", { method: "POST", body: JSON.stringify(form) }).then(() => setForm({ username: "", display_name: "", role: "viewer", temporary_password: "" }));
+  };
+  const resetPassword = (account: TailViewAccount) => {
+    const password = window.prompt(`Enter a temporary password for ${account.username} (minimum 12 characters):`);
+    if (password) void mutate(`/settings/app-users/${account.id}/reset-password`, { method: "POST", body: JSON.stringify({ temporary_password: password }) });
+  };
+  const required = policy.data?.required_roles ?? [];
+  const accountItems = accounts.data?.pages.flatMap((page) => page.items) ?? [];
+  const sessionItems = sessions.data?.pages.flatMap((page) => page.items) ?? [];
+  const toggleRequiredRole = (role: string) => {
+    const roles = required.includes(role) ? required.filter((item) => item !== role) : [...required, role];
+    void mutate("/settings/auth-policy", { method: "PUT", body: JSON.stringify({ required_roles: roles }) }, "Changing MFA requirements may restrict active accounts until they enroll. Continue?");
+  };
+  return <div className="page">
+    <PageHead eyebrow="ADMINISTRATION" title="TailView access" description="Manage local application accounts and sessions. These are separate from synchronized Tailscale users." />
+    {error && <div className="notice warning">{error}</div>}
+    <div className="settings-grid">
+      <Card className="settings-card">
+        <CardHead title="Create TailView account" detail="The temporary password must be replaced at first sign-in." />
+        <form className="stack-form" onSubmit={createAccount}>
+          <label>Username<input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required /></label>
+          <label>Display name<input value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} /></label>
+          <label>Role<select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}><option value="viewer">Viewer</option><option value="administrator">Administrator</option></select></label>
+          <label>Temporary password<input type="password" autoComplete="new-password" minLength={12} value={form.temporary_password} onChange={(e) => setForm({ ...form, temporary_password: e.target.value })} required /></label>
+          <Button type="submit"><UserPlus /> Create account</Button>
+        </form>
+      </Card>
+      <Card className="settings-card">
+        <CardHead title="MFA policy" detail="Optional by default; require enrollment by TailView role." />
+        {(["administrator", "viewer"] as const).map((role) => <label className="check-row" key={role}><input type="checkbox" checked={required.includes(role)} onChange={() => toggleRequiredRole(role)} /><span><strong>Require for {role}s</strong><small>Accounts without MFA enter restricted enrollment.</small></span></label>)}
+      </Card>
+      <Card className="settings-card full">
+        <CardHead title="TailView accounts" detail="Deactivate accounts instead of deleting their audit identity." action={<input aria-label="Search TailView accounts" placeholder="Search accounts…" value={accountSearch} onChange={(e) => setAccountSearch(e.target.value)} />} />
+        {accounts.isLoading ? <Loading /> : accounts.error ? <ErrorState error={accounts.error} /> : <><div className="table-scroll"><table><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>MFA</th><th>Sessions</th><th>Last login</th><th>Actions</th></tr></thead><tbody>{accountItems.map((account) => <tr key={account.id}><td><strong>{account.display_name || account.username}</strong><small className="block">{account.username}</small>{account.must_change_password && <Badge tone="warning">Password change required</Badge>}</td><td><Badge tone={account.role === "administrator" ? "success" : "neutral"}>{account.role}</Badge></td><td><Badge tone={account.active ? "success" : "neutral"}>{account.active ? "Active" : "Inactive"}</Badge></td><td>{account.mfa_enabled ? "Enabled" : "Not enabled"}</td><td>{account.session_count}</td><td>{account.last_login_at ? relativeTime(account.last_login_at) : "Never"}</td><td><div className="table-actions"><Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}`, { method: "PATCH", body: JSON.stringify({ role: account.role === "administrator" ? "viewer" : "administrator" }) }, `Change ${account.username}'s role?`)}>Change role</Button><Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}`, { method: "PATCH", body: JSON.stringify({ active: !account.active }) }, `${account.active ? "Deactivate" : "Reactivate"} ${account.username}?`)}>{account.active ? "Deactivate" : "Reactivate"}</Button><Button className="ghost" onClick={() => resetPassword(account)}>Reset password</Button><Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}/revoke-sessions`, { method: "POST" }, `Revoke every session for ${account.username}?`)}>Revoke sessions</Button>{account.mfa_enabled && <Button className="ghost" onClick={() => void mutate(`/settings/app-users/${account.id}/reset-mfa`, { method: "POST" }, `Reset MFA for ${account.username}?`)}>Reset MFA</Button>}</div></td></tr>)}</tbody></table></div>{accounts.hasNextPage && <Button className="secondary" onClick={() => void accounts.fetchNextPage()}>Load more accounts</Button>}</>}
+      </Card>
+      <Card className="settings-card full"><CardHead title="Active sessions" detail="Revocation takes effect on the next request." action={<input aria-label="Search active sessions" placeholder="Search username…" value={sessionSearch} onChange={(e) => setSessionSearch(e.target.value)} />} />{sessions.isLoading ? <Loading /> : <><div className="session-list">{sessionItems.map((session) => <div className="session-row" key={session.id}><Laptop /><div><strong>{session.username}</strong><p>{session.user_agent}</p><small>{session.last_ip} · {relativeTime(session.last_seen_at)}</small></div><Button className="ghost" onClick={() => void mutate(`/settings/app-sessions/${session.id}`, { method: "DELETE" }, `Revoke ${session.username}'s session?`)}>Revoke</Button></div>)}</div>{sessions.hasNextPage && <Button className="secondary" onClick={() => void sessions.fetchNextPage()}>Load more sessions</Button>}</>}</Card>
+      <Card className="settings-card full"><CardHead title="Local security history" detail="Immutable TailView authentication and administration events." />{events.isLoading ? <Loading /> : <div className="table-scroll"><table><thead><tr><th>Event</th><th>Result</th><th>Source</th><th>When</th><th>Correlation ID</th></tr></thead><tbody>{events.data?.items.map((event) => <tr key={event.id}><td>{event.event.replaceAll("_", " ")}</td><td><Badge tone={event.result === "success" ? "success" : "warning"}>{event.result}</Badge></td><td><code>{event.source_address}</code></td><td>{relativeTime(event.occurred_at)}</td><td><code>{event.correlation_id || "Not reported"}</code></td></tr>)}</tbody></table></div>}</Card>
+    </div>
+  </div>;
+}
+
 export function SettingsPage({ user }: { user: { role: string } }) {
   const query = useQuery({
     queryKey: ["capabilities"],
@@ -2913,6 +3218,11 @@ export function SettingsPage({ user }: { user: { role: string } }) {
           )}
         </Card>
         {user.role === "administrator" && <>
+          <Card className="settings-card">
+            <CardHead title="TailView access" detail="Local application accounts, sessions, MFA policy, and security history." />
+            <p className="settings-link-copy">TailView accounts are independent from synchronized tailnet users.</p>
+            <Link className="button secondary" to="/settings/access">Manage TailView access</Link>
+          </Card>
           <Card className="settings-card">
             <CardHead title="DNS configuration" detail="Preferences, resolvers, search domains, split DNS, and provenance." />
             <p className="settings-link-copy">The full read-only DNS inventory now has a dedicated administrator page.</p>

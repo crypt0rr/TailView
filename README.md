@@ -6,8 +6,10 @@ TailView is a self-hosted, read-only observability dashboard for a Tailscale tai
 
 ## Features
 
-- One-time setup-token bootstrap, Argon2id passwords, revocable server-side sessions, administrator/viewer RBAC, login throttling, and CSRF protection.
-- Device/user inventory with multi-role classification, routes, tags, local metadata, saved-view schema, and provenance.
+- One-time setup-token bootstrap, Argon2id passwords, optional TOTP MFA, recovery codes, revocable server-side sessions, administrator/viewer RBAC, progressive login throttling, and CSRF protection.
+- Administrator-managed TailView accounts remain separate from tailnet users. Temporary passwords require replacement, users can inspect and revoke their own sessions, and Administrators can manage fleet sessions, MFA policy, and immutable local security history under **Settings → TailView access**.
+- Device/user inventory with multi-role classification, routes, tags, local metadata, and provenance.
+- Private or team-shared saved workspaces with authenticated links and personal page defaults.
 - A Security posture workspace with typed device attributes, expiry/freshness coverage, current-policy evaluation, conservative findings, feature settings, and redacted integration inventory.
 - Administrator-only access governance for credential metadata, device invites, tailnet contacts, log-stream status, expiry, and conservative review findings. TailView never requests usable secret values.
 - A durable Findings workspace consolidates policy, posture, expiry, governance, and repeated synchronization signals with acknowledgement, suppression, assignment, recurrence, automatic resolution, and immutable lifecycle history.
@@ -33,6 +35,8 @@ docker compose ps
 ```
 
 Open `http://localhost:8080`, then create the first administrator with `TAILVIEW_SETUP_TOKEN`. Setup becomes unavailable after the account is created.
+
+The first Administrator can create additional local accounts from **Settings → TailView access**. New accounts receive an Administrator-assigned temporary password and must replace it at first login. Every user can open account security by selecting their identity at the bottom of the sidebar.
 
 To preview the complete UI without a tailnet, set `DEMO_MODE=true` before first startup. Demo data is synthetic, displays demo provenance, and is never mixed with real synchronization.
 

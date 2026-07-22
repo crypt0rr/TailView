@@ -37,6 +37,54 @@ export interface Device {
   posture?: DevicePosture;
   connectivity?: DeviceConnectivity;
 }
+
+export interface AppSession {
+  id: string;
+  user_id: string;
+  username?: string | null;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  initial_ip: string;
+  last_ip: string;
+  user_agent: string;
+  restricted: boolean;
+  current: boolean;
+}
+
+export interface TailViewAccount {
+  id: string;
+  username: string;
+  display_name: string;
+  role: "administrator" | "viewer";
+  active: boolean;
+  must_change_password: boolean;
+  mfa_enabled: boolean;
+  last_login_at: string | null;
+  password_changed_at: string | null;
+  deactivated_at: string | null;
+  created_at: string;
+  session_count: number;
+}
+
+export interface SavedViewRecord {
+  id: string;
+  name: string;
+  description: string;
+  page: string;
+  visibility: "private" | "shared";
+  state: Record<string, unknown>;
+  schema_version: number;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  owner: { id: string; username: string; display_name: string };
+  can_edit: boolean;
+  is_owner: boolean;
+  is_default: boolean;
+  compatible: boolean;
+}
 export interface PostureAttribute {
   key: string;
   namespace: string;

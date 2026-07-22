@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -31,9 +32,15 @@ class AppUser(Base):
     __tablename__ = "app_users"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     username: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(255), default="")
     password_hash: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(32), default="viewer")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -47,7 +54,69 @@ class Session(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    initial_ip: Mapped[str] = mapped_column(String(128), default="unknown")
+    last_ip: Mapped[str] = mapped_column(String(128), default="unknown")
+    user_agent: Mapped[str] = mapped_column(String(512), default="")
+    restricted: Mapped[bool] = mapped_column(Boolean, default=False)
     user: Mapped[AppUser] = relationship()
+
+
+class MfaCredential(Base):
+    __tablename__ = "mfa_credentials"
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("app_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    encrypted_secret: Mapped[bytes] = mapped_column(LargeBinary)
+    last_counter: Mapped[int | None] = mapped_column(Integer)
+    enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MfaRecoveryCode(Base):
+    __tablename__ = "mfa_recovery_codes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("app_users.id", ondelete="CASCADE"), index=True
+    )
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AuthChallenge(Base):
+    __tablename__ = "auth_challenges"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("app_users.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(32), default="login_mfa")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AuthPolicy(Base):
+    __tablename__ = "auth_policy"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="current")
+    required_roles: Mapped[list[str]] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class LocalSecurityEvent(Base):
+    __tablename__ = "local_security_events"
+    __table_args__ = (Index("ix_local_security_events_time_id", "occurred_at", "id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    event: Mapped[str] = mapped_column(String(64), index=True)
+    actor_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    subject_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    correlation_id: Mapped[str] = mapped_column(String(128), default="")
+    source_address: Mapped[str] = mapped_column(String(128), default="unknown")
+    user_agent: Mapped[str] = mapped_column(String(512), default="")
+    result: Mapped[str] = mapped_column(String(32), default="success")
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class LoginAttempt(Base):
@@ -403,12 +472,46 @@ class LogStreamingConfiguration(Base):
 
 class SavedView(Base):
     __tablename__ = "saved_views"
+    __table_args__ = (Index("ix_saved_views_page_visibility", "page", "visibility"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    owner_id: Mapped[str] = mapped_column(ForeignKey("app_users.id", ondelete="CASCADE"))
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("app_users.id", ondelete="CASCADE"), index=True
+    )
     name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str] = mapped_column(String(500), default="")
     page: Mapped[str] = mapped_column(String(64))
+    visibility: Mapped[str] = mapped_column(String(16), default="private")
     state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    owner: Mapped[AppUser] = relationship()
+
+
+Index(
+    "uq_saved_views_owner_page_lower_name",
+    SavedView.owner_id,
+    SavedView.page,
+    func.lower(SavedView.name),
+    unique=True,
+)
+
+
+class SavedViewDefault(Base):
+    __tablename__ = "saved_view_defaults"
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("app_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    page: Mapped[str] = mapped_column(String(64), primary_key=True)
+    view_id: Mapped[str] = mapped_column(
+        ForeignKey("saved_views.id", ondelete="CASCADE"), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class Finding(Base):

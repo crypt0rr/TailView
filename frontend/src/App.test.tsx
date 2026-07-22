@@ -9,12 +9,14 @@ import { api } from "./api";
 import {
   AddressInventoryView,
   AccessGovernance,
+  AccountSecurity,
   DeviceTrafficRanking,
   DeviceTable,
   dnsConfigurationEntries,
   Findings,
   PolicySecurityReview,
   SecurityPosture,
+  TailViewAccess,
   dashboardMetricCards,
   keyExpiryState,
   trafficChartData,
@@ -77,7 +79,16 @@ describe("TailView", () => {
       if (!signedIn) return <div>Welcome back</div>;
       return (
         <Shell
-          user={{ id: "admin", username: "admin", role: "administrator" }}
+          user={{
+            id: "admin",
+            username: "admin",
+            display_name: "Administrator",
+            role: "administrator",
+            must_change_password: false,
+            mfa_enabled: false,
+            mfa_required: false,
+            auth_status: "authenticated",
+          }}
           onLogout={() => setSignedIn(false)}
         />
       );
@@ -143,6 +154,40 @@ describe("TailView", () => {
 
     expect(onSelect).toHaveBeenCalledOnce();
     expect(onSelect).toHaveBeenCalledWith(device);
+  });
+
+  it("shows self-service account security and current sessions", async () => {
+    const request = vi.spyOn(apiModule, "request").mockImplementation(async (path) => {
+      if (path === "/auth/sessions") return { items: [{
+        id: "session-1", user_id: "viewer-1", created_at: "2026-07-22T08:00:00Z",
+        last_seen_at: "2026-07-22T09:00:00Z", expires_at: "2026-07-22T20:00:00Z",
+        revoked_at: null, initial_ip: "192.0.2.10", last_ip: "192.0.2.10",
+        user_agent: "Firefox on Linux", restricted: false, current: true,
+      }] } as never;
+      throw new Error(`Unexpected request ${path}`);
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><MemoryRouter><AccountSecurity user={{ username: "viewer", role: "viewer", mfa_enabled: false, mfa_required: false }} /></MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByText("Account security")).toBeTruthy();
+    expect(screen.getByText("Firefox on Linux")).toBeTruthy();
+    expect(screen.getByText("Current")).toBeTruthy();
+    request.mockRestore();
+  });
+
+  it("separates TailView account administration from tailnet users", async () => {
+    const request = vi.spyOn(apiModule, "request").mockImplementation(async (path) => {
+      if (String(path).startsWith("/settings/app-users?")) return { items: [{ id: "local-1", username: "viewer", display_name: "Local Viewer", role: "viewer", active: true, must_change_password: true, mfa_enabled: false, last_login_at: null, password_changed_at: null, deactivated_at: null, created_at: "2026-07-22T08:00:00Z", session_count: 0 }], next_cursor: null } as never;
+      if (String(path).startsWith("/settings/app-sessions?")) return { items: [], next_cursor: null } as never;
+      if (path === "/settings/auth-policy") return { required_roles: [] } as never;
+      if (path === "/settings/auth-events?limit=25") return { items: [], next_cursor: null } as never;
+      throw new Error(`Unexpected request ${path}`);
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><MemoryRouter><TailViewAccess /></MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByText("TailView access")).toBeTruthy();
+    expect(screen.getByText("Local Viewer")).toBeTruthy();
+    expect(screen.getByText("Password change required")).toBeTruthy();
+    request.mockRestore();
   });
 
   it("shows fleet posture metrics, limitations, findings, and filters", async () => {

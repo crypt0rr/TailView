@@ -18,6 +18,23 @@ export class ApiError extends Error {
   }
 }
 
+export type CurrentUser = {
+  id: string;
+  username: string;
+  display_name: string;
+  role: "administrator" | "viewer";
+  must_change_password: boolean;
+  mfa_enabled: boolean;
+  mfa_required: boolean;
+  auth_status: "authenticated" | "password_change_required" | "mfa_enrollment_required";
+};
+
+export type AuthResult = {
+  status: "authenticated" | "password_change_required" | "mfa_enrollment_required" | "mfa_required";
+  user: CurrentUser | null;
+  challenge: string | null;
+};
+
 export async function request<T>(
   path: string,
   options: RequestInit = {},
@@ -54,11 +71,10 @@ export const api = {
   setup: (body: unknown) =>
     request("/setup", { method: "POST", body: JSON.stringify(body) }),
   login: (body: unknown) =>
-    request("/auth/login", { method: "POST", body: JSON.stringify(body) }),
-  me: () =>
-    request<{ id: string; username: string; role: "administrator" | "viewer" }>(
-      "/auth/me",
-    ),
+    request<AuthResult>("/auth/login", { method: "POST", body: JSON.stringify(body) }),
+  verifyMfa: (body: unknown) =>
+    request<AuthResult>("/auth/mfa/verify", { method: "POST", body: JSON.stringify(body) }),
+  me: () => request<CurrentUser>("/auth/me"),
   logout: () => request("/auth/logout", { method: "POST" }),
   dashboard: () => request<Record<string, unknown>>("/dashboard"),
 };

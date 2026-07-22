@@ -12,7 +12,8 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import String, and_, cast, desc, func, or_, select
+from sqlalchemy import String, and_, cast, delete, desc, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import auth
@@ -55,13 +56,19 @@ from .models import (
     FindingTransition,
     Flow,
     LocalMetadata,
+    LocalSecurityEvent,
     LogStreamingConfiguration,
+    MfaCredential,
+    MfaRecoveryCode,
     NotificationDelivery,
     NotificationEndpoint,
     PolicySnapshot,
     PostureIntegration,
+    SavedView,
+    SavedViewDefault,
     ServiceEndpoint,
     ServiceHost,
+    Session,
     SyncJob,
     TailnetContact,
     TailnetCredential,
@@ -79,18 +86,39 @@ from .policy import (
     security_review_policy,
     source_line,
 )
+from .saved_views import compatible_state, normalize_state, page_allowed
 from .schemas import (
+    AppUserCreateRequest,
+    AppUserPasswordResetRequest,
+    AppUserUpdateRequest,
+    AuthPolicyRequest,
+    AuthResult,
     CredentialRequest,
     FindingActionRequest,
     FindingAssignRequest,
     FindingSuppressRequest,
     LoginRequest,
     MetadataUpdate,
+    MfaCodeRequest,
+    MfaPasswordRequest,
+    MfaVerifyRequest,
     NotificationEndpointRequest,
+    PasswordChangeRequest,
+    SavedViewCloneRequest,
+    SavedViewCreateRequest,
+    SavedViewDefaultRequest,
+    SavedViewUpdateRequest,
     SetupRequest,
     UserResponse,
 )
-from .security import SecretBox, new_token
+from .security import (
+    SecretBox,
+    hash_password,
+    new_token,
+    new_totp_secret,
+    verify_password,
+    verify_totp,
+)
 from .sync import (
     sync_contacts,
     sync_credentials,
@@ -391,38 +419,956 @@ async def get_setup_status(db: Db) -> dict[str, bool]:
 @router.post("/setup", response_model=UserResponse)
 async def setup(
     payload: SetupRequest,
+    request: Request,
     response: Response,
     db: Db,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> UserResponse:
-    return await auth.setup_admin(payload, response, db, settings)
+    return await auth.setup_admin(payload, request, response, db, settings)
 
 
-@router.post("/auth/login", response_model=UserResponse)
+@router.post("/auth/login", response_model=AuthResult)
 async def login(
     payload: LoginRequest,
     request: Request,
     response: Response,
     db: Db,
     settings: Annotated[Settings, Depends(get_settings)],
-) -> UserResponse:
+) -> AuthResult:
     return await auth.login(payload, request, response, db, settings)
 
 
 @router.get("/auth/me", response_model=UserResponse)
-async def me(user: Authed) -> UserResponse:
-    return UserResponse(id=user.id, username=user.username, role=user.role)
+async def me(
+    session: Annotated[Session, Depends(auth.current_session)], db: Db
+) -> UserResponse:
+    result = await auth.response_for_user(db, session.user, session)
+    await db.commit()
+    return result
+
+
+@router.post("/auth/mfa/verify", response_model=AuthResult)
+async def verify_login_mfa(
+    payload: MfaVerifyRequest,
+    request: Request,
+    response: Response,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AuthResult:
+    return await auth.verify_login_mfa(
+        payload.challenge, payload.code, request, response, db, settings
+    )
 
 
 @router.post("/auth/logout")
 async def logout(
+    request: Request,
     response: Response,
     db: Db,
     session: Annotated[Any, Depends(auth.current_session)],
     _: Csrf,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> None:
-    await auth.logout(response, session, db, settings)
+    await auth.logout(response, session, db, settings, request)
+
+
+def _session_dict(row: Session, current_id: str, username: str | None = None) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "user_id": row.user_id,
+        "username": username,
+        "created_at": row.created_at,
+        "last_seen_at": row.last_seen_at,
+        "expires_at": row.expires_at,
+        "revoked_at": row.revoked_at,
+        "initial_ip": row.initial_ip,
+        "last_ip": row.last_ip,
+        "user_agent": row.user_agent or "Not reported",
+        "restricted": row.restricted,
+        "current": row.id == current_id,
+    }
+
+
+@router.post("/auth/password", response_model=UserResponse)
+async def change_password(
+    payload: PasswordChangeRequest,
+    request: Request,
+    response: Response,
+    session: Annotated[Session, Depends(auth.current_session)],
+    _: Csrf,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> UserResponse:
+    user = session.user
+    if not verify_password(user.password_hash, payload.current_password):
+        auth.add_security_event(
+            db, request, "password.change", actor_id=user.id, subject_id=user.id, result="failure"
+        )
+        await db.commit()
+        raise HTTPException(401, "Current password is incorrect")
+    if verify_password(user.password_hash, payload.new_password):
+        raise HTTPException(422, "New password must be different")
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    user.password_changed_at = datetime.now(UTC)
+    await auth.revoke_user_sessions(db, user.id)
+    auth.add_security_event(db, request, "password.change", actor_id=user.id, subject_id=user.id)
+    _replacement_session, result = await auth.create_session(
+        db, user, response, settings, request
+    )
+    return result
+
+
+@router.get("/auth/sessions")
+async def own_sessions(
+    session: Annotated[Session, Depends(auth.current_session)], db: Db
+) -> dict[str, Any]:
+    rows = (
+        await db.scalars(
+            select(Session)
+            .where(Session.user_id == session.user_id)
+            .order_by(Session.last_seen_at.desc(), Session.id.desc())
+            .limit(100)
+        )
+    ).all()
+    return {"items": [_session_dict(row, session.id) for row in rows]}
+
+
+@router.delete("/auth/sessions/{session_id}")
+async def revoke_own_session(
+    session_id: str,
+    request: Request,
+    response: Response,
+    current: Annotated[Session, Depends(auth.current_session)],
+    _: Csrf,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, bool]:
+    target = await db.get(Session, session_id)
+    if target is None or target.user_id != current.user_id:
+        raise HTTPException(404, "Session not found")
+    target.revoked_at = datetime.now(UTC)
+    auth.add_security_event(
+        db,
+        request,
+        "session.revoke",
+        actor_id=current.user_id,
+        subject_id=current.user_id,
+        details={"current": target.id == current.id},
+    )
+    await db.commit()
+    if target.id == current.id:
+        response.delete_cookie(auth.SESSION_COOKIE, path="/", secure=settings.cookie_secure)
+        response.delete_cookie(auth.CSRF_COOKIE, path="/", secure=settings.cookie_secure)
+    return {"logged_out": target.id == current.id}
+
+
+@router.post("/auth/sessions/revoke-others")
+async def revoke_other_sessions(
+    request: Request,
+    current: Annotated[Session, Depends(auth.current_session)],
+    _: Csrf,
+    db: Db,
+) -> dict[str, int]:
+    count = await auth.revoke_user_sessions(db, current.user_id, except_session_id=current.id)
+    auth.add_security_event(
+        db,
+        request,
+        "session.revoke_others",
+        actor_id=current.user_id,
+        subject_id=current.user_id,
+        details={"count": count},
+    )
+    await db.commit()
+    return {"revoked": count}
+
+
+@router.post("/auth/mfa/enroll")
+async def enroll_mfa(
+    payload: MfaPasswordRequest,
+    request: Request,
+    session: Annotated[Session, Depends(auth.current_session)],
+    _: Csrf,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, str]:
+    user = session.user
+    if not verify_password(user.password_hash, payload.password):
+        raise HTTPException(401, "Current password is incorrect")
+    secret = new_totp_secret()
+    credential = await db.get(MfaCredential, user.id)
+    if credential is None:
+        credential = MfaCredential(user_id=user.id, encrypted_secret=b"")
+    credential.encrypted_secret = SecretBox(settings.encryption_key).encrypt(secret)
+    credential.last_counter = None
+    credential.enrolled_at = None
+    db.add(credential)
+    await db.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
+    auth.add_security_event(
+        db, request, "mfa.enrollment_started", actor_id=user.id, subject_id=user.id
+    )
+    await db.commit()
+    return {"secret": secret, "uri": auth.totp_uri(user, secret)}
+
+
+@router.post("/auth/mfa/confirm")
+async def confirm_mfa(
+    payload: MfaCodeRequest,
+    request: Request,
+    session: Annotated[Session, Depends(auth.current_session)],
+    _: Csrf,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    user = session.user
+    credential = await db.get(MfaCredential, user.id)
+    if credential is None:
+        raise HTTPException(409, "Start MFA enrollment first")
+    secret = SecretBox(settings.encryption_key).decrypt(credential.encrypted_secret)
+    counter = verify_totp(secret, payload.code)
+    if counter is None:
+        auth.add_security_event(
+            db, request, "mfa.enrollment", actor_id=user.id, subject_id=user.id, result="failure"
+        )
+        await db.commit()
+        raise HTTPException(401, "Invalid verification code")
+    credential.last_counter = counter
+    credential.enrolled_at = datetime.now(UTC)
+    user.mfa_enabled = True
+    codes = await auth.replace_recovery_codes(db, user.id)
+    user_response = await auth.response_for_user(db, user, session)
+    auth.add_security_event(db, request, "mfa.enrollment", actor_id=user.id, subject_id=user.id)
+    await db.commit()
+    return {"recovery_codes": codes, "user": user_response.model_dump()}
+
+
+@router.post("/auth/mfa/disable", response_model=UserResponse)
+async def disable_mfa(
+    payload: MfaPasswordRequest,
+    request: Request,
+    session: Annotated[Session, Depends(auth.current_session)],
+    _: Csrf,
+    db: Db,
+) -> UserResponse:
+    user = session.user
+    if not verify_password(user.password_hash, payload.password):
+        raise HTTPException(401, "Current password is incorrect")
+    await db.execute(delete(MfaCredential).where(MfaCredential.user_id == user.id))
+    await db.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
+    user.mfa_enabled = False
+    result = await auth.response_for_user(db, user, session)
+    auth.add_security_event(db, request, "mfa.disable", actor_id=user.id, subject_id=user.id)
+    await db.commit()
+    return result
+
+
+@router.post("/auth/mfa/recovery-codes")
+async def regenerate_recovery_codes(
+    payload: MfaPasswordRequest,
+    request: Request,
+    session: Annotated[Session, Depends(auth.current_session)],
+    _: Csrf,
+    db: Db,
+) -> dict[str, list[str]]:
+    user = session.user
+    if not user.mfa_enabled or not verify_password(user.password_hash, payload.password):
+        raise HTTPException(401, "Current password is incorrect")
+    codes = await auth.replace_recovery_codes(db, user.id)
+    auth.add_security_event(
+        db, request, "mfa.recovery_regenerated", actor_id=user.id, subject_id=user.id
+    )
+    await db.commit()
+    return {"recovery_codes": codes}
+
+
+def _app_user_dict(user: AppUser, session_count: int = 0) -> dict[str, Any]:
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "role": user.role,
+        "active": user.active,
+        "must_change_password": user.must_change_password,
+        "mfa_enabled": user.mfa_enabled,
+        "last_login_at": user.last_login_at,
+        "password_changed_at": user.password_changed_at,
+        "deactivated_at": user.deactivated_at,
+        "created_at": user.created_at,
+        "session_count": session_count,
+    }
+
+
+async def _active_admin_count(db: AsyncSession) -> int:
+    return int(
+        await db.scalar(
+            select(func.count()).select_from(AppUser).where(
+                AppUser.active.is_(True), AppUser.role == "administrator"
+            )
+        )
+        or 0
+    )
+
+
+@router.get("/settings/app-users")
+async def app_users(
+    _: Admin,
+    db: Db,
+    search: str = Query("", max_length=255),
+    role: Literal["administrator", "viewer"] | None = None,
+    active: bool | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    session_counts = (
+        select(Session.user_id, func.count().label("count"))
+        .where(Session.revoked_at.is_(None), Session.expires_at > datetime.now(UTC))
+        .group_by(Session.user_id)
+        .subquery()
+    )
+    statement = select(AppUser, func.coalesce(session_counts.c.count, 0)).outerjoin(
+        session_counts, AppUser.id == session_counts.c.user_id
+    )
+    if search:
+        pattern = f"%{search}%"
+        statement = statement.where(
+            or_(AppUser.username.ilike(pattern), AppUser.display_name.ilike(pattern))
+        )
+    if role:
+        statement = statement.where(AppUser.role == role)
+    if active is not None:
+        statement = statement.where(AppUser.active.is_(active))
+    decoded = decode_cursor(cursor, "app_users")
+    if decoded:
+        statement = statement.where(
+            or_(
+                func.lower(AppUser.username) > decoded["username"],
+                and_(
+                    func.lower(AppUser.username) == decoded["username"],
+                    AppUser.id > decoded["id"],
+                ),
+            )
+        )
+    rows = (
+        await db.execute(
+            statement.order_by(func.lower(AppUser.username), AppUser.id).limit(limit + 1)
+        )
+    ).all()
+    page = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit:
+        last = page[-1][0]
+        next_cursor = encode_cursor(
+            "app_users", {"username": last.username.casefold(), "id": last.id}
+        )
+    return {
+        "items": [_app_user_dict(user, int(count)) for user, count in page],
+        "next_cursor": next_cursor,
+    }
+
+
+@router.post("/settings/app-users")
+async def create_app_user(
+    payload: AppUserCreateRequest, request: Request, actor: Admin, _: Csrf, db: Db
+) -> dict[str, Any]:
+    username = payload.username.casefold()
+    if await db.scalar(select(AppUser.id).where(AppUser.username == username)):
+        raise HTTPException(409, "A TailView account with this username already exists")
+    user = AppUser(
+        username=username,
+        display_name=payload.display_name.strip() or payload.username,
+        password_hash=hash_password(payload.temporary_password),
+        role=payload.role,
+        must_change_password=True,
+    )
+    db.add(user)
+    await db.flush()
+    auth.add_security_event(
+        db,
+        request,
+        "account.create",
+        actor_id=actor.id,
+        subject_id=user.id,
+        details={"role": user.role},
+    )
+    await db.commit()
+    return _app_user_dict(user)
+
+
+@router.patch("/settings/app-users/{user_id}")
+async def update_app_user(
+    user_id: str,
+    payload: AppUserUpdateRequest,
+    request: Request,
+    actor: Admin,
+    _: Csrf,
+    db: Db,
+) -> dict[str, Any]:
+    user = await db.get(AppUser, user_id)
+    if user is None:
+        raise HTTPException(404, "TailView account not found")
+    removing_admin = user.active and user.role == "administrator" and (
+        payload.active is False or payload.role == "viewer"
+    )
+    if removing_admin and await _active_admin_count(db) <= 1:
+        raise HTTPException(409, "The final active Administrator cannot be changed")
+    changes: dict[str, Any] = {}
+    if payload.display_name is not None:
+        user.display_name = payload.display_name.strip() or user.username
+        changes["display_name"] = True
+    if payload.role is not None and payload.role != user.role:
+        changes["role"] = {"from": user.role, "to": payload.role}
+        user.role = payload.role
+    if payload.active is not None and payload.active != user.active:
+        changes["active"] = payload.active
+        user.active = payload.active
+        user.deactivated_at = None if payload.active else datetime.now(UTC)
+    if "role" in changes or "active" in changes:
+        await auth.revoke_user_sessions(db, user.id)
+    auth.add_security_event(
+        db,
+        request,
+        "account.update",
+        actor_id=actor.id,
+        subject_id=user.id,
+        details=changes,
+    )
+    await db.commit()
+    return _app_user_dict(user)
+
+
+@router.post("/settings/app-users/{user_id}/reset-password")
+async def reset_app_user_password(
+    user_id: str,
+    payload: AppUserPasswordResetRequest,
+    request: Request,
+    actor: Admin,
+    _: Csrf,
+    db: Db,
+) -> dict[str, bool]:
+    user = await db.get(AppUser, user_id)
+    if user is None:
+        raise HTTPException(404, "TailView account not found")
+    user.password_hash = hash_password(payload.temporary_password)
+    user.must_change_password = True
+    user.password_changed_at = datetime.now(UTC)
+    await auth.revoke_user_sessions(db, user.id)
+    auth.add_security_event(
+        db, request, "password.admin_reset", actor_id=actor.id, subject_id=user.id
+    )
+    await db.commit()
+    return {"reset": True}
+
+
+@router.post("/settings/app-users/{user_id}/revoke-sessions")
+async def revoke_app_user_sessions(
+    user_id: str, request: Request, actor: Admin, _: Csrf, db: Db
+) -> dict[str, int]:
+    if await db.get(AppUser, user_id) is None:
+        raise HTTPException(404, "TailView account not found")
+    count = await auth.revoke_user_sessions(db, user_id)
+    auth.add_security_event(
+        db,
+        request,
+        "session.admin_revoke_all",
+        actor_id=actor.id,
+        subject_id=user_id,
+        details={"count": count},
+    )
+    await db.commit()
+    return {"revoked": count}
+
+
+@router.post("/settings/app-users/{user_id}/reset-mfa")
+async def reset_app_user_mfa(
+    user_id: str, request: Request, actor: Admin, _: Csrf, db: Db
+) -> dict[str, bool]:
+    user = await db.get(AppUser, user_id)
+    if user is None:
+        raise HTTPException(404, "TailView account not found")
+    await db.execute(delete(MfaCredential).where(MfaCredential.user_id == user.id))
+    await db.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
+    user.mfa_enabled = False
+    await auth.revoke_user_sessions(db, user.id)
+    auth.add_security_event(db, request, "mfa.admin_reset", actor_id=actor.id, subject_id=user.id)
+    await db.commit()
+    return {"reset": True}
+
+
+@router.get("/settings/app-sessions")
+async def app_sessions(
+    _: Admin,
+    current: Annotated[Session, Depends(auth.current_session)],
+    db: Db,
+    search: str = Query("", max_length=255),
+    active: bool | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    statement = select(Session, AppUser.username).join(AppUser, Session.user_id == AppUser.id)
+    if search:
+        statement = statement.where(AppUser.username.ilike(f"%{search}%"))
+    now = datetime.now(UTC)
+    if active is True:
+        statement = statement.where(Session.revoked_at.is_(None), Session.expires_at > now)
+    elif active is False:
+        statement = statement.where(or_(Session.revoked_at.is_not(None), Session.expires_at <= now))
+    decoded = decode_cursor(cursor, "app_sessions")
+    if decoded:
+        last_seen = datetime.fromisoformat(decoded["last_seen"])
+        statement = statement.where(
+            or_(
+                Session.last_seen_at < last_seen,
+                and_(Session.last_seen_at == last_seen, Session.id < decoded["id"]),
+            )
+        )
+    rows = (
+        await db.execute(
+            statement.order_by(Session.last_seen_at.desc(), Session.id.desc()).limit(limit + 1)
+        )
+    ).all()
+    page = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit:
+        last = page[-1][0]
+        next_cursor = encode_cursor(
+            "app_sessions", {"last_seen": last.last_seen_at.isoformat(), "id": last.id}
+        )
+    return {
+        "items": [_session_dict(session, current.id, username) for session, username in page],
+        "next_cursor": next_cursor,
+    }
+
+
+@router.delete("/settings/app-sessions/{session_id}")
+async def revoke_app_session(
+    session_id: str,
+    request: Request,
+    response: Response,
+    actor: Admin,
+    current: Annotated[Session, Depends(auth.current_session)],
+    _: Csrf,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, bool]:
+    target = await db.get(Session, session_id)
+    if target is None:
+        raise HTTPException(404, "Session not found")
+    target.revoked_at = datetime.now(UTC)
+    auth.add_security_event(
+        db,
+        request,
+        "session.admin_revoke",
+        actor_id=actor.id,
+        subject_id=target.user_id,
+        details={"current": target.id == current.id},
+    )
+    await db.commit()
+    if target.id == current.id:
+        response.delete_cookie(auth.SESSION_COOKIE, path="/", secure=settings.cookie_secure)
+        response.delete_cookie(auth.CSRF_COOKIE, path="/", secure=settings.cookie_secure)
+    return {"logged_out": target.id == current.id}
+
+
+@router.get("/settings/auth-policy")
+async def get_auth_policy(_: Admin, db: Db) -> dict[str, Any]:
+    policy = await auth.auth_policy(db)
+    await db.commit()
+    return {"required_roles": policy.required_roles, "updated_at": policy.updated_at}
+
+
+@router.put("/settings/auth-policy")
+async def set_auth_policy(
+    payload: AuthPolicyRequest, request: Request, actor: Admin, _: Csrf, db: Db
+) -> dict[str, Any]:
+    policy = await auth.auth_policy(db)
+    policy.required_roles = sorted(set(payload.required_roles))
+    policy.updated_at = datetime.now(UTC)
+    users = (await db.scalars(select(AppUser).where(AppUser.active.is_(True)))).all()
+    for user in users:
+        restricted = user.must_change_password or (
+            user.role in policy.required_roles and not user.mfa_enabled
+        )
+        await db.execute(
+            update(Session)
+            .where(Session.user_id == user.id, Session.revoked_at.is_(None))
+            .values(restricted=restricted)
+        )
+    auth.add_security_event(
+        db,
+        request,
+        "auth_policy.update",
+        actor_id=actor.id,
+        subject_id=actor.id,
+        details={"required_roles": policy.required_roles},
+    )
+    await db.commit()
+    return {"required_roles": policy.required_roles, "updated_at": policy.updated_at}
+
+
+@router.get("/settings/auth-events")
+async def auth_events(
+    _: Admin,
+    db: Db,
+    event: str = Query("", max_length=64),
+    result: str = Query("", max_length=32),
+    limit: int = Query(100, ge=1, le=500),
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    statement = select(LocalSecurityEvent)
+    if event:
+        statement = statement.where(LocalSecurityEvent.event == event)
+    if result:
+        statement = statement.where(LocalSecurityEvent.result == result)
+    decoded = decode_cursor(cursor, "auth_events")
+    if decoded:
+        occurred_at = datetime.fromisoformat(decoded["occurred_at"])
+        statement = statement.where(
+            or_(
+                LocalSecurityEvent.occurred_at < occurred_at,
+                and_(
+                    LocalSecurityEvent.occurred_at == occurred_at,
+                    LocalSecurityEvent.id < decoded["id"],
+                ),
+            )
+        )
+    rows = (
+        await db.scalars(
+            statement.order_by(
+                LocalSecurityEvent.occurred_at.desc(), LocalSecurityEvent.id.desc()
+            ).limit(limit + 1)
+        )
+    ).all()
+    page = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit:
+        last = page[-1]
+        next_cursor = encode_cursor(
+            "auth_events", {"occurred_at": last.occurred_at.isoformat(), "id": last.id}
+        )
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "event": row.event,
+                "actor_id": row.actor_id,
+                "subject_id": row.subject_id,
+                "correlation_id": row.correlation_id,
+                "source_address": row.source_address,
+                "user_agent": row.user_agent,
+                "result": row.result,
+                "details": row.details,
+                "occurred_at": row.occurred_at,
+            }
+            for row in page
+        ],
+        "next_cursor": next_cursor,
+    }
+
+
+def _saved_view_visible(user: AppUser, view: SavedView) -> bool:
+    return (
+        page_allowed(view.page, user.role)
+        and (
+            user.role == "administrator"
+            or view.owner_id == user.id
+            or view.visibility == "shared"
+        )
+    )
+
+
+async def _saved_view_for_user(view_id: str, user: AppUser, db: AsyncSession) -> SavedView:
+    view = await db.get(SavedView, view_id)
+    if view is None or not _saved_view_visible(user, view):
+        raise HTTPException(404, "Saved view not found")
+    return view
+
+
+async def _saved_view_count(user_id: str, db: AsyncSession) -> int:
+    return int(
+        await db.scalar(
+            select(func.count()).select_from(SavedView).where(SavedView.owner_id == user_id)
+        )
+        or 0
+    )
+
+
+async def _saved_view_name_available(
+    db: AsyncSession, owner_id: str, page: str, name: str, exclude_id: str | None = None
+) -> bool:
+    statement = select(SavedView.id).where(
+        SavedView.owner_id == owner_id,
+        SavedView.page == page,
+        func.lower(SavedView.name) == name.casefold(),
+    )
+    if exclude_id:
+        statement = statement.where(SavedView.id != exclude_id)
+    return await db.scalar(statement) is None
+
+
+def _saved_view_dict(
+    view: SavedView,
+    user: AppUser,
+    owner: AppUser | None,
+    default_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    compatible = compatible_state(view.page, view.schema_version, view.state)
+    return {
+        "id": view.id,
+        "name": view.name,
+        "description": view.description,
+        "page": view.page,
+        "visibility": view.visibility,
+        "state": view.state if compatible else {},
+        "schema_version": view.schema_version,
+        "revision": view.revision,
+        "created_at": view.created_at,
+        "updated_at": view.updated_at,
+        "owner": {
+            "id": view.owner_id,
+            "username": owner.username if owner else "Unavailable",
+            "display_name": owner.display_name if owner else "",
+        },
+        "can_edit": view.owner_id == user.id or user.role == "administrator",
+        "is_owner": view.owner_id == user.id,
+        "is_default": view.id in (default_ids or set()),
+        "compatible": compatible,
+    }
+
+
+@router.get("/saved-views")
+async def saved_views(
+    user: Authed,
+    db: Db,
+    page: str = Query("", max_length=64),
+    scope: Literal["all", "mine", "shared"] = "all",
+    visibility: Literal["private", "shared"] | None = None,
+    search: str = Query("", max_length=128),
+) -> dict[str, Any]:
+    if page and not page_allowed(page, user.role):
+        raise HTTPException(404, "Saved-view page not found")
+    statement = select(SavedView, AppUser).join(AppUser, SavedView.owner_id == AppUser.id)
+    if user.role != "administrator":
+        statement = statement.where(
+            or_(SavedView.owner_id == user.id, SavedView.visibility == "shared")
+        )
+    if user.role != "administrator":
+        statement = statement.where(SavedView.page != "access_governance")
+    if page:
+        statement = statement.where(SavedView.page == page)
+    if scope == "mine":
+        statement = statement.where(SavedView.owner_id == user.id)
+    elif scope == "shared":
+        statement = statement.where(
+            SavedView.visibility == "shared", SavedView.owner_id != user.id
+        )
+    if visibility:
+        statement = statement.where(SavedView.visibility == visibility)
+    if search:
+        pattern = f"%{search}%"
+        statement = statement.where(
+            or_(SavedView.name.ilike(pattern), SavedView.description.ilike(pattern))
+        )
+    defaults = set(
+        (
+            await db.scalars(
+                select(SavedViewDefault.view_id).where(SavedViewDefault.user_id == user.id)
+            )
+        ).all()
+    )
+    rows = (
+        await db.execute(statement.order_by(SavedView.page, func.lower(SavedView.name)).limit(500))
+    ).all()
+    return {
+        "items": [_saved_view_dict(view, user, owner, defaults) for view, owner in rows]
+    }
+
+
+@router.post("/saved-views")
+async def create_saved_view(
+    payload: SavedViewCreateRequest,
+    user: Authed,
+    _: Csrf,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    if not page_allowed(payload.page, user.role):
+        raise HTTPException(404, "Saved-view page not found")
+    if await _saved_view_count(user.id, db) >= settings.saved_view_limit:
+        raise HTTPException(409, f"Saved-view limit of {settings.saved_view_limit} reached")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(422, "Saved-view name is required")
+    if not await _saved_view_name_available(db, user.id, payload.page, name):
+        raise HTTPException(409, "A saved view with this name already exists for this page")
+    try:
+        state_value = normalize_state(payload.page, payload.state)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    view = SavedView(
+        owner_id=user.id,
+        name=name,
+        description=payload.description.strip(),
+        page=payload.page,
+        visibility=payload.visibility,
+        state=state_value,
+        schema_version=payload.schema_version,
+    )
+    db.add(view)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(409, "A saved view with this name already exists") from exc
+    await db.refresh(view)
+    return _saved_view_dict(view, user, user)
+
+
+@router.get("/saved-views/defaults")
+async def saved_view_defaults(user: Authed, db: Db) -> dict[str, Any]:
+    rows = (
+        await db.execute(
+            select(SavedViewDefault, SavedView, AppUser)
+            .join(SavedView, SavedViewDefault.view_id == SavedView.id)
+            .join(AppUser, SavedView.owner_id == AppUser.id)
+            .where(SavedViewDefault.user_id == user.id)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "page": preference.page,
+                "view": _saved_view_dict(view, user, owner, {view.id}),
+            }
+            for preference, view, owner in rows
+            if _saved_view_visible(user, view)
+        ]
+    }
+
+
+@router.put("/saved-views/defaults/{page}")
+async def set_saved_view_default(
+    page: str,
+    payload: SavedViewDefaultRequest,
+    user: Authed,
+    _: Csrf,
+    db: Db,
+) -> dict[str, Any]:
+    if not page_allowed(page, user.role):
+        raise HTTPException(404, "Saved-view page not found")
+    preference = await db.get(SavedViewDefault, (user.id, page))
+    if payload.view_id is None:
+        if preference:
+            await db.delete(preference)
+        await db.commit()
+        return {"page": page, "view_id": None}
+    view = await _saved_view_for_user(payload.view_id, user, db)
+    if view.page != page or not compatible_state(view.page, view.schema_version, view.state):
+        raise HTTPException(422, "The saved view cannot be used as this page default")
+    if preference is None:
+        preference = SavedViewDefault(user_id=user.id, page=page, view_id=view.id)
+    else:
+        preference.view_id = view.id
+        preference.updated_at = datetime.now(UTC)
+    db.add(preference)
+    await db.commit()
+    return {"page": page, "view_id": view.id}
+
+
+@router.get("/saved-views/{view_id}")
+async def saved_view_detail(view_id: str, user: Authed, db: Db) -> dict[str, Any]:
+    view = await _saved_view_for_user(view_id, user, db)
+    owner = await db.get(AppUser, view.owner_id)
+    default = await db.get(SavedViewDefault, (user.id, view.page))
+    return _saved_view_dict(
+        view, user, owner, {view.id} if default and default.view_id == view.id else set()
+    )
+
+
+@router.put("/saved-views/{view_id}")
+async def update_saved_view(
+    view_id: str,
+    payload: SavedViewUpdateRequest,
+    user: Authed,
+    _: Csrf,
+    db: Db,
+) -> dict[str, Any]:
+    view = await db.get(SavedView, view_id)
+    if view is None or not page_allowed(view.page, user.role):
+        raise HTTPException(404, "Saved view not found")
+    if view.owner_id != user.id and user.role != "administrator":
+        raise HTTPException(403, "Only the owner or an Administrator can update this view")
+    if view.revision != payload.expected_revision:
+        raise HTTPException(409, "Saved view changed; reload before updating")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(422, "Saved-view name is required")
+    if not await _saved_view_name_available(db, view.owner_id, view.page, name, view.id):
+        raise HTTPException(409, "A saved view with this name already exists for this page")
+    try:
+        view.state = normalize_state(view.page, payload.state)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    view.name = name
+    view.description = payload.description.strip()
+    view.visibility = payload.visibility
+    view.schema_version = payload.schema_version
+    view.revision += 1
+    view.updated_at = datetime.now(UTC)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(409, "A saved view with this name already exists") from exc
+    owner = await db.get(AppUser, view.owner_id)
+    return _saved_view_dict(view, user, owner)
+
+
+@router.delete("/saved-views/{view_id}")
+async def delete_saved_view(view_id: str, user: Authed, _: Csrf, db: Db) -> None:
+    view = await db.get(SavedView, view_id)
+    if view is None or not page_allowed(view.page, user.role):
+        raise HTTPException(404, "Saved view not found")
+    if view.owner_id != user.id and user.role != "administrator":
+        raise HTTPException(403, "Only the owner or an Administrator can delete this view")
+    await db.delete(view)
+    await db.commit()
+
+
+@router.post("/saved-views/{view_id}/clone")
+async def clone_saved_view(
+    view_id: str,
+    payload: SavedViewCloneRequest,
+    user: Authed,
+    _: Csrf,
+    db: Db,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    source = await _saved_view_for_user(view_id, user, db)
+    if not compatible_state(source.page, source.schema_version, source.state):
+        raise HTTPException(422, "This saved view uses an incompatible state schema")
+    if await _saved_view_count(user.id, db) >= settings.saved_view_limit:
+        raise HTTPException(409, f"Saved-view limit of {settings.saved_view_limit} reached")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(422, "Saved-view name is required")
+    if not await _saved_view_name_available(db, user.id, source.page, name):
+        raise HTTPException(409, "A saved view with this name already exists for this page")
+    view = SavedView(
+        owner_id=user.id,
+        name=name,
+        description=source.description,
+        page=source.page,
+        visibility=payload.visibility,
+        state=source.state,
+        schema_version=source.schema_version,
+    )
+    db.add(view)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(409, "A saved view with this name already exists") from exc
+    return _saved_view_dict(view, user, user)
 
 
 @router.get("/dashboard")

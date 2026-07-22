@@ -9,6 +9,7 @@ import {
 } from "react-router-dom";
 import {
   Activity,
+  Bookmark,
   Boxes,
   BellRing,
   ChevronRight,
@@ -36,9 +37,10 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { api, ApiError, request } from "./api";
+import { api, ApiError, request, type AuthResult, type CurrentUser } from "./api";
 import { Button, Loading } from "./components";
 import { useTimeRange } from "./timeRange";
+import type { SavedViewRecord } from "./types";
 import {
   Dashboard,
   Devices,
@@ -50,15 +52,12 @@ import {
   SettingsPage,
   Services,
   SecurityPosture,
+  AccountSecurity,
+  TailViewAccess,
   AccessGovernance,
   Topology,
 } from "./pages";
 
-type CurrentUser = {
-  id: string;
-  username: string;
-  role: "administrator" | "viewer";
-};
 export const nav = [
   ["Dashboard", "/", LayoutDashboard],
   ["Topology", "/topology", Network],
@@ -219,22 +218,38 @@ function Setup({ onDone }: { onDone: () => void }) {
     </AuthFrame>
   );
 }
-function Login({ onDone }: { onDone: () => void }) {
+function Login({ onDone }: { onDone: (result: AuthResult) => void }) {
   const [form, setForm] = useState({ username: "", password: "" });
+  const [challenge, setChallenge] = useState("");
+  const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     try {
-      await api.login(form);
-      onDone();
+      const result = challenge
+        ? await api.verifyMfa({ challenge, code })
+        : await api.login(form);
+      if (result.status === "mfa_required" && result.challenge) {
+        setChallenge(result.challenge);
+        setCode("");
+      } else {
+        onDone(result);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     }
   };
   return (
-    <AuthFrame title="Welcome back" subtitle="Sign in to inspect your tailnet.">
+    <AuthFrame
+      title={challenge ? "Verify your identity" : "Welcome back"}
+      subtitle={challenge ? "Enter an authenticator code or unused recovery code." : "Sign in to inspect your tailnet."}
+    >
       <form onSubmit={submit} className="auth-form">
+        {challenge ? <label>
+          Verification code
+          <input autoFocus autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} required />
+        </label> : <>
         <label>
           Username
           <input
@@ -245,6 +260,7 @@ function Login({ onDone }: { onDone: () => void }) {
             required
           />
         </label>
+        </>}
         <label>
           Password
           <input
@@ -257,11 +273,63 @@ function Login({ onDone }: { onDone: () => void }) {
         </label>
         {error && <p className="form-error">{error}</p>}
         <Button type="submit">
-          Sign in <ChevronRight size={16} />
+          {challenge ? "Verify" : "Sign in"} <ChevronRight size={16} />
         </Button>
+        {challenge && <button className="text-button" type="button" onClick={() => { setChallenge(""); setCode(""); }}>Use another account</button>}
       </form>
     </AuthFrame>
   );
+}
+
+function RequiredOnboarding({ user, onDone }: { user: CurrentUser; onDone: () => void }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [secret, setSecret] = useState("");
+  const [code, setCode] = useState("");
+  const [recovery, setRecovery] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const changePassword = async (event: React.FormEvent) => {
+    event.preventDefault(); setError("");
+    try {
+      await request("/auth/password", { method: "POST", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) });
+      setCurrentPassword(""); setNewPassword(""); onDone();
+    } catch (err) { setError(err instanceof Error ? err.message : "Password change failed"); }
+  };
+  const startMfa = async (event: React.FormEvent) => {
+    event.preventDefault(); setError("");
+    try {
+      const result = await request<{ secret: string }>("/auth/mfa/enroll", { method: "POST", body: JSON.stringify({ password: currentPassword }) });
+      setSecret(result.secret); setCurrentPassword("");
+    } catch (err) { setError(err instanceof Error ? err.message : "MFA enrollment failed"); }
+  };
+  const confirmMfa = async (event: React.FormEvent) => {
+    event.preventDefault(); setError("");
+    try {
+      const result = await request<{ recovery_codes: string[] }>("/auth/mfa/confirm", { method: "POST", body: JSON.stringify({ code }) });
+      setRecovery(result.recovery_codes); setCode("");
+    } catch (err) { setError(err instanceof Error ? err.message : "Verification failed"); }
+  };
+  if (recovery.length) return <AuthFrame title="Save your recovery codes" subtitle="Each code works once. They cannot be shown again.">
+    <div className="recovery-codes">{recovery.map((item) => <code key={item}>{item}</code>)}</div>
+    <Button onClick={onDone}>I saved these codes <ChevronRight size={16} /></Button>
+  </AuthFrame>;
+  if (user.auth_status === "password_change_required") return <AuthFrame title="Choose a permanent password" subtitle="Your temporary password must be replaced before continuing.">
+    <form className="auth-form" onSubmit={changePassword}>
+      <label>Temporary password<input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label>
+      <label>New password<input type="password" autoComplete="new-password" minLength={12} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label>
+      {error && <p className="form-error">{error}</p>}<Button type="submit">Update password <ChevronRight size={16} /></Button>
+    </form>
+  </AuthFrame>;
+  return <AuthFrame title="Protect your account" subtitle="Your role requires multi-factor authentication.">
+    {!secret ? <form className="auth-form" onSubmit={startMfa}>
+      <label>Current password<input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label>
+      {error && <p className="form-error">{error}</p>}<Button type="submit">Start MFA enrollment <ChevronRight size={16} /></Button>
+    </form> : <form className="auth-form" onSubmit={confirmMfa}>
+      <p className="hint">Add this secret to your authenticator app:</p><code className="enrollment-secret">{secret}</code>
+      <label>Authenticator code<input autoFocus autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value)} required /></label>
+      {error && <p className="form-error">{error}</p>}<Button type="submit">Confirm MFA <ChevronRight size={16} /></Button>
+    </form>}
+  </AuthFrame>;
 }
 function AuthFrame({
   title,
@@ -383,8 +451,9 @@ export function Shell({
     onLogout();
     navigate("/", { replace: true });
   };
-  const active =
-    nav.find(([, path]) => path === location.pathname)?.[0] ?? "TailView";
+  const active = nav.find(([, path]) => path === location.pathname)?.[0]
+    ?? (location.pathname === "/security/account" ? "Account security"
+      : location.pathname === "/settings/access" ? "TailView access" : "TailView");
   return (
     <div className={`app-shell ${collapsed ? "collapsed" : ""}`}>
       <aside className={mobile ? "mobile-open" : ""}>
@@ -455,10 +524,10 @@ export function Shell({
         </nav>
         <div className="aside-user">
           <CircleUserRound />
-          <div>
+          <button className="user-security-link" onClick={() => navigate("/security/account")} title="Account security">
             <strong>{user.username}</strong>
             <small>{user.role}</small>
-          </div>
+          </button>
           <button onClick={logout} className="icon-button" title="Log out">
             <LogOut />
           </button>
@@ -536,6 +605,7 @@ export function Shell({
             <Route path="/tags" element={<InventoryPage kind="tags" />} />
             <Route path="/policy" element={<Policy />} />
             <Route path="/security/posture" element={<SecurityPosture />} />
+            <Route path="/security/account" element={<AccountSecurity user={user} />} />
             <Route path="/findings" element={<Findings user={user} />} />
             <Route
               path="/security/governance"
@@ -560,6 +630,7 @@ export function Shell({
               }
             />
             <Route path="/settings" element={<SettingsPage user={user} />} />
+            <Route path="/settings/access" element={user.role === "administrator" ? <TailViewAccess /> : <Navigate to="/security/account" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
@@ -574,6 +645,17 @@ function CommandPalette({
 }) {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
+  const savedViews = useQuery({
+    queryKey: ["saved-views", "command-palette"],
+    queryFn: () => request<{ items: SavedViewRecord[] }>("/saved-views"),
+    enabled: open,
+  });
+  const savedViewPaths: Record<string, string> = {
+    devices: "/devices", exit_nodes: "/exit-nodes", subnet_routers: "/subnet-routers",
+    flows: "/flows", topology: "/topology", findings: "/findings",
+    security_posture: "/security/posture", services: "/services",
+    access_governance: "/security/governance",
+  };
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -608,6 +690,14 @@ function CommandPalette({
           >
             <Icon />
             {label}
+            <ChevronRight />
+          </button>
+        ))}
+        {(savedViews.data?.items ?? []).filter((view) => view.compatible).length > 0 && <div className="command-section-label">Saved views</div>}
+        {(savedViews.data?.items ?? []).filter((view) => view.compatible).map((view) => (
+          <button key={view.id} onClick={() => { navigate(`${savedViewPaths[view.page]}?view=${encodeURIComponent(view.id)}`); setOpen(false); }}>
+            <Bookmark />
+            <span>{view.name}<small>{view.page.replaceAll("_", " ")} · {view.owner.username}</small></span>
             <ChevronRight />
           </button>
         ))}
@@ -659,5 +749,8 @@ export default function App() {
         Unable to load your session.<small>{me.error.message}</small>
       </div>
     );
+  if (me.data!.auth_status !== "authenticated") {
+    return <RequiredOnboarding user={me.data!} onDone={() => void qc.invalidateQueries({ queryKey: ["me"] })} />;
+  }
   return <Shell user={me.data!} onLogout={() => setLoggedOut(true)} />;
 }
