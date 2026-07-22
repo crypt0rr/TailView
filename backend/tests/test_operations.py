@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
@@ -188,29 +188,105 @@ async def test_operations_findings_require_persistent_failures(database) -> None
 @pytest.mark.asyncio
 async def test_readiness_checks_database_scheduler_and_encryption(database, monkeypatch) -> None:
     key = base64.urlsafe_b64encode(b"k" * 32).decode()
+    async with operations.engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(64))"))
+        await connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES ('0014_v1_completion')")
+        )
     monkeypatch.setattr(main, "engine", operations.engine)
+    monkeypatch.setattr(main, "packaged_schema_heads", lambda: ("0014_v1_completion",))
     monkeypatch.setattr(
         main,
         "settings",
-        SimpleNamespace(production=False, encryption_key=key, demo_mode=False),
+        SimpleNamespace(
+            production=False,
+            encryption_key=key,
+            demo_mode=False,
+            tailview_version="1.0.0-rc.1",
+            tailview_revision="abc123",
+            tailview_build_time="2026-07-22T12:00:00Z",
+        ),
     )
-    request = Request({"type": "http", "method": "GET", "path": "/health/ready", "headers": []})
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/health/ready", "headers": []}
+    )
     request.scope["app"] = SimpleNamespace(
         state=SimpleNamespace(scheduler=SimpleNamespace(running=True))
     )
     response = await main.ready(request)
     assert response.status_code == 200
-    assert json.loads(bytes(response.body))["checks"] == {
+    body = json.loads(bytes(response.body))
+    assert body["checks"] == {
         "database": True,
         "migrations": True,
         "scheduler": True,
         "encryption": True,
     }
+    assert body["schema"] == {
+        "expected": ["0014_v1_completion"],
+        "current": ["0014_v1_completion"],
+    }
+    assert body["version"]["application"] == "1.0.0-rc.1"
     monkeypatch.setattr(
         main,
         "settings",
-        SimpleNamespace(production=False, encryption_key="bad", demo_mode=False),
+        SimpleNamespace(
+            production=False,
+            encryption_key="bad",
+            demo_mode=False,
+            tailview_version="dev",
+            tailview_revision="unknown",
+            tailview_build_time="unknown",
+        ),
     )
     failed = await main.ready(request)
     assert failed.status_code == 503
     assert json.loads(bytes(failed.body))["checks"]["encryption"] is False
+
+
+@pytest.mark.asyncio
+async def test_readiness_rejects_missing_older_newer_and_multiple_revisions(
+    database, monkeypatch
+) -> None:
+    key = base64.urlsafe_b64encode(b"k" * 32).decode()
+    monkeypatch.setattr(main, "engine", operations.engine)
+    monkeypatch.setattr(main, "packaged_schema_heads", lambda: ("0014_v1_completion",))
+    monkeypatch.setattr(
+        main,
+        "settings",
+        SimpleNamespace(
+            production=True,
+            encryption_key=key,
+            demo_mode=True,
+            tailview_version="dev",
+            tailview_revision="unknown",
+            tailview_build_time="unknown",
+        ),
+    )
+    request = Request({"type": "http", "method": "GET", "path": "/health/ready", "headers": []})
+    request.scope["app"] = SimpleNamespace(state=SimpleNamespace(scheduler=None))
+    async with operations.engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(64))"))
+
+    for revisions in [[], ["0013_operations_center"], ["0015_future"], ["a", "b"]]:
+        async with operations.engine.begin() as connection:
+            await connection.execute(text("DELETE FROM alembic_version"))
+            for revision in revisions:
+                await connection.execute(
+                    text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+                    {"revision": revision},
+                )
+        response = await main.ready(request)
+        assert response.status_code == 503
+        assert json.loads(bytes(response.body))["checks"]["migrations"] is False
+
+    monkeypatch.setattr(
+        main, "packaged_schema_heads", lambda: ("0014_v1_completion", "0014_other")
+    )
+    async with operations.engine.begin() as connection:
+        await connection.execute(text("DELETE FROM alembic_version"))
+        await connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES ('0014_v1_completion')")
+        )
+    response = await main.ready(request)
+    assert response.status_code == 503

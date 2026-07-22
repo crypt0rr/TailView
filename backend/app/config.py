@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     environment: str = "production"
+    tailview_version: str = "dev"
+    tailview_revision: str = "unknown"
+    tailview_build_time: str = "unknown"
     app_url: str = "http://localhost:8080"
     database_url: str = "postgresql+psycopg://tailview:tailview@database:5432/tailview"
     setup_token: str = Field(default="change-me-before-starting", alias="TAILVIEW_SETUP_TOKEN")

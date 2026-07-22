@@ -1,0 +1,7 @@
+services:
+  backend:
+    build: !reset null
+  frontend:
+    build: !reset null
+  telemetry-agent:
+    build: !reset null

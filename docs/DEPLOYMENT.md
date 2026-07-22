@@ -6,6 +6,21 @@ Copy `.env.example`, replace all public example secrets, then run `docker compos
 
 For Caddy, set a resolvable `APP_DOMAIN`, use `COOKIE_SECURE=true`, and start the `caddy` profile. For Tailscale Serve or another reverse proxy, forward to the frontend only and configure the exact external `APP_URL`.
 
+## GitHub Container Registry releases
+
+Pushing a signed `vMAJOR.MINOR.PATCH` tag runs the release workflow. It publishes the backend, frontend, and optional telemetry-agent images to `ghcr.io/crypt0rr` for `linux/amd64` and `linux/arm64`, attaches SBOM/provenance attestations, and creates a GitHub Release with a checksummed Compose bundle. Prerelease tags such as `v1.2.0-rc.1` do not update `latest`.
+
+Use `docker-compose.release.yml` to remove local build contexts and consume only published images:
+
+```bash
+cp .env.example .env
+# Set TAILVIEW_VERSION to the release without the leading v.
+docker compose -f docker-compose.yml -f docker-compose.release.yml pull
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d
+```
+
+The first GHCR publication is private by default. Set each package to public in GitHub package settings if anonymous pulls are desired. Prefer immutable version tags or digests over `latest` for production rollback safety.
+
 ## Backup and restore
 
 Create encrypted, access-controlled PostgreSQL custom-format dumps with `make backup`. TailView writes SHA-256 and JSON sidecars beside the dump. Verify a dump with `make verify-backup FILE=tailview.dump`; the drill creates a uniquely named, isolated PostgreSQL container, restores the dump, applies current migrations, performs safe authentication/inventory/reporting table checks, records the result in **Operations**, and removes the temporary resources. It never targets the live database.
@@ -19,7 +34,9 @@ The credential-encryption key is not stored in PostgreSQL and must be backed up 
 3. Run migrations and verify readiness.
 4. Validate capability and synchronization pages.
 
-Application rollback is safe only when its schema is compatible with the migrated database. Prefer restoring the pre-upgrade database into a new volume rather than running destructive down migrations.
+Application rollback is safe only when its schema is compatible with the migrated database. Restore the pre-upgrade database into a new volume rather than running destructive down migrations. Before v1 promotion, use the [release checklist](RELEASE_CHECKLIST.md) to record the backup hash, isolated restore result, image digests, and 24-hour read-only soak.
+
+`/health/live` checks only the API process. `/health/ready` additionally reports safe application build metadata and the expected/current Alembic revisions. It returns not-ready when the packaged migrations have no head, multiple heads, or the database revision is missing, older, newer, or otherwise different from the single packaged head.
 
 ## Resource guidance
 

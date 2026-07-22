@@ -1,13 +1,24 @@
-FROM python:3.13.5-slim AS builder
+FROM python:3.13.14-alpine AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.7.19 /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/venv
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-FROM python:3.13.5-slim AS runtime
-ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-RUN groupadd --gid 10001 tailview && useradd --uid 10001 --gid tailview --no-create-home --home-dir /app tailview
+FROM python:3.13.14-alpine AS runtime
+ARG TAILVIEW_VERSION=dev
+ARG TAILVIEW_REVISION=unknown
+ARG TAILVIEW_BUILD_TIME=unknown
+LABEL org.opencontainers.image.source="https://github.com/crypt0rr/TailView" \
+      org.opencontainers.image.description="TailView FastAPI backend and scheduler" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version=$TAILVIEW_VERSION \
+      org.opencontainers.image.revision=$TAILVIEW_REVISION \
+      org.opencontainers.image.created=$TAILVIEW_BUILD_TIME
+ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    TAILVIEW_VERSION=$TAILVIEW_VERSION TAILVIEW_REVISION=$TAILVIEW_REVISION \
+    TAILVIEW_BUILD_TIME=$TAILVIEW_BUILD_TIME
+RUN addgroup -g 10001 tailview && adduser -D -u 10001 -G tailview -h /app tailview
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY app app

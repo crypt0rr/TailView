@@ -13,6 +13,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from sqlalchemy import text
 
 from .api import router
+from .build_info import packaged_schema_heads
 from .config import get_settings
 from .db import SessionLocal, engine
 from .demo import seed_demo
@@ -23,6 +24,7 @@ from .sync import create_scheduler
 log = structlog.get_logger()
 REQUESTS = Counter("tailview_http_requests_total", "HTTP requests", ["method", "status"])
 DURATION = Histogram("tailview_http_request_duration_seconds", "HTTP request duration", ["method"])
+settings = get_settings()
 
 
 @asynccontextmanager
@@ -30,10 +32,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     if settings.production and settings.setup_token == "change-me-before-starting":  # noqa: S105
         raise RuntimeError("Set a strong TAILVIEW_SETUP_TOKEN before production startup")
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            __import__("app.models", fromlist=["Base"]).Base.metadata.create_all
-        )
     if settings.demo_mode:
         async with SessionLocal() as session:
             await seed_demo(session)
@@ -49,9 +47,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(
-    title="TailView API", version="1.0.0", lifespan=lifespan, docs_url="/api/docs", redoc_url=None
+    title="TailView API",
+    version=settings.tailview_version,
+    lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url=None,
 )
-settings = get_settings()
 if settings.cors_origins:
     app.add_middleware(
         CORSMiddleware,
@@ -111,25 +112,52 @@ async def live() -> dict[str, str]:
 @app.get("/health/ready")
 async def ready(request: Request) -> Response:
     checks = {"database": False, "migrations": False, "scheduler": False, "encryption": False}
+    expected_revisions: tuple[str, ...] = ()
+    current_revisions: tuple[str, ...] = ()
     try:
+        expected_revisions = packaged_schema_heads()
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
             checks["database"] = True
-            if connection.dialect.name != "postgresql" or not settings.production:
-                checks["migrations"] = True
-            else:
-                revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-                checks["migrations"] = revision == "0013_operations_center"
+            current_revisions = tuple(
+                sorted(
+                    str(value)
+                    for value in (
+                        await connection.execute(text("SELECT version_num FROM alembic_version"))
+                    ).scalars()
+                )
+            )
+            checks["migrations"] = (
+                len(expected_revisions) == 1 and current_revisions == expected_revisions
+            )
         SecretBox(settings.encryption_key)
         checks["encryption"] = True
         scheduler = getattr(request.app.state, "scheduler", None)
         checks["scheduler"] = settings.demo_mode or bool(scheduler and scheduler.running)
     except Exception as exc:
         log.warning("readiness_check_failed", error_type=type(exc).__name__)
+    if not checks["migrations"]:
+        log.warning(
+            "schema_revision_mismatch",
+            expected_revisions=expected_revisions,
+            current_revisions=current_revisions,
+        )
     ready_value = all(checks.values())
     return JSONResponse(
         status_code=200 if ready_value else 503,
-        content={"status": "ready" if ready_value else "not_ready", "checks": checks},
+        content={
+            "status": "ready" if ready_value else "not_ready",
+            "checks": checks,
+            "version": {
+                "application": settings.tailview_version,
+                "revision": settings.tailview_revision,
+                "buildTime": settings.tailview_build_time,
+            },
+            "schema": {
+                "expected": list(expected_revisions),
+                "current": list(current_revisions),
+            },
+        },
     )
 
 

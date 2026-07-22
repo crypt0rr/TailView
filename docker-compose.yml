@@ -25,6 +25,7 @@ services:
 
   backend:
     container_name: tailview-api
+    image: ${TAILVIEW_IMAGE_NAMESPACE:-ghcr.io/crypt0rr}/tailview-backend:${TAILVIEW_VERSION:-latest}
     build: ./backend
     restart: unless-stopped
     init: true
@@ -74,6 +75,7 @@ services:
 
   frontend:
     container_name: tailview-web
+    image: ${TAILVIEW_IMAGE_NAMESPACE:-ghcr.io/crypt0rr}/tailview-frontend:${TAILVIEW_VERSION:-latest}
     build: ./frontend
     restart: unless-stopped
     init: true
@@ -106,6 +108,7 @@ services:
 
   telemetry-agent:
     container_name: tailview-telemetry
+    image: ${TAILVIEW_IMAGE_NAMESPACE:-ghcr.io/crypt0rr}/tailview-telemetry-agent:${TAILVIEW_VERSION:-latest}
     build: ./deploy/telemetry-agent
     profiles: [telemetry]
     restart: unless-stopped

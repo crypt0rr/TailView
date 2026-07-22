@@ -997,7 +997,7 @@ async def seed_demo(session: AsyncSession) -> None:
             size=8_388_608,
             status="success",
             postgres_version="17.5",
-            migration_revision="0013_operations_center",
+            migration_revision="0014_v1_completion",
             checks={
                 "restore": True,
                 "migrations": True,

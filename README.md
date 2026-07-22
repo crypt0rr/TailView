@@ -39,6 +39,26 @@ docker compose ps
 
 Open `http://localhost:8080`, then create the first administrator with `TAILVIEW_SETUP_TOKEN`. Setup becomes unavailable after the account is created.
 
+### Released container images
+
+Versioned releases publish AMD64 and ARM64 images to GitHub Container Registry:
+
+- `ghcr.io/crypt0rr/tailview-backend`
+- `ghcr.io/crypt0rr/tailview-frontend`
+- `ghcr.io/crypt0rr/tailview-telemetry-agent`
+
+For a deployment that never builds application images locally, download the Compose bundle from the matching GitHub Release and run:
+
+```bash
+cp .env.example .env
+# Replace every REPLACE value, then pin the release rather than using latest.
+TAILVIEW_VERSION=1.0.0 docker compose \
+  -f docker-compose.yml -f docker-compose.release.yml \
+  up -d
+```
+
+Stable `vMAJOR.MINOR.PATCH` tags update `latest`; prereleases never do. Production deployments should pin a version or an OCI digest.
+
 The first Administrator can create additional local accounts from **Settings → TailView access**. New accounts receive an Administrator-assigned temporary password and must replace it at first login. Every user can open account security by selecting their identity at the bottom of the sidebar.
 
 To preview the complete UI without a tailnet, set `DEMO_MODE=true` before first startup. Demo data is synthetic, displays demo provenance, and is never mixed with real synchronization.
@@ -92,7 +112,7 @@ Resolved findings and notification delivery history are retained for 180 days by
 - Tailscale Serve: proxy the local frontend port; keep `APP_URL`, `COOKIE_SECURE=true`, and trusted proxy settings aligned with the public origin.
 - Optional telemetry: review the socket risk in [SECURITY.md](SECURITY.md), configure a unique telemetry secret, then use `--profile telemetry`.
 
-See [architecture](docs/ARCHITECTURE.md), [deployment](docs/DEPLOYMENT.md), and [policy engine](docs/POLICY_ENGINE.md) for operational details.
+See [architecture](docs/ARCHITECTURE.md), [deployment](docs/DEPLOYMENT.md), [release process](docs/RELEASING.md), [v1 release checklist](docs/RELEASE_CHECKLIST.md), and [policy engine](docs/POLICY_ENGINE.md) for operational details.
 
 ## Important limitations
 
@@ -110,7 +130,7 @@ Back up PostgreSQL before upgrades:
 ```bash
 docker compose exec -T database pg_dump -U tailview -Fc tailview > tailview.dump
 docker compose pull
-docker compose up -d --build
+docker compose up -d
 ```
 
 Use `make backup`, verify it safely with `make verify-backup FILE=tailview.dump`, or restore deliberately with `make restore FILE=tailview.dump`. The verification command never targets the live database; see [deployment details](docs/DEPLOYMENT.md).

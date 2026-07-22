@@ -17,6 +17,7 @@ import {
   Clock3,
   CalendarClock,
   Copy,
+  Database,
   Download,
   Eye,
   Scan,
@@ -3416,6 +3417,26 @@ function durationLabel(seconds: number | null | undefined) {
   return `${Math.floor(seconds / 86400)}d`;
 }
 
+function OperationsMetric({
+  icon,
+  label,
+  value,
+  detail,
+  tone = "neutral",
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: React.ReactNode;
+  detail: string;
+  tone?: "neutral" | "success" | "warning";
+}) {
+  return <Card className={`operations-metric ${tone}`}>
+    <div className="operations-metric-heading"><span>{icon}</span><small>{label}</small></div>
+    <strong>{value}</strong>
+    <p>{detail}</p>
+  </Card>;
+}
+
 export function Operations() {
   const queryClient = useQueryClient();
   const [params, setParams] = useSearchParams();
@@ -3480,24 +3501,24 @@ export function Operations() {
     </div>
     {tab === "overview" && <>
       <div className="metric-grid operations-metrics">
-        <Card className="metric-card"><span>Scheduler</span><strong>{value.scheduler?.last_status ?? "Unknown"}</strong><small>{value.scheduler?.heartbeat_at ? `Heartbeat ${relativeTime(value.scheduler.heartbeat_at)}` : "No heartbeat recorded"}</small></Card>
-        <Card className="metric-card"><span>Degraded jobs</span><strong>{value.degraded_jobs}</strong><small>{value.jobs.length} instrumented jobs</small></Card>
-        <Card className="metric-card"><span>Queued work</span><strong>{queueDepth}</strong><small>Reports and notification deliveries</small></Card>
-        <Card className="metric-card"><span>Database</span><strong>{storage.data?.database_bytes === null || storage.data?.database_bytes === undefined ? "Not reported" : formatBytes(storage.data.database_bytes)}</strong><small>Host capacity requires host monitoring</small></Card>
+        <OperationsMetric icon={<Clock3 />} label="Scheduler" value={(value.scheduler?.last_status ?? "Unknown").replaceAll("_", " ")} detail={value.scheduler?.heartbeat_at ? `Heartbeat ${relativeTime(value.scheduler.heartbeat_at)}` : "No heartbeat recorded"} tone={value.scheduler?.unhealthy ? "warning" : "success"} />
+        <OperationsMetric icon={<Activity />} label="Degraded jobs" value={value.degraded_jobs} detail={`${value.jobs.length} instrumented jobs`} tone={value.degraded_jobs ? "warning" : "success"} />
+        <OperationsMetric icon={<List />} label="Queued work" value={queueDepth} detail="Reports and notification deliveries" tone={Object.values(value.queues).some((queue) => queue.warning) ? "warning" : "neutral"} />
+        <OperationsMetric icon={<Database />} label="Database" value={storage.data?.database_bytes === null || storage.data?.database_bytes === undefined ? "Not reported" : formatBytes(storage.data.database_bytes)} detail="PostgreSQL data and indexes" />
       </div>
       <div className="operations-grid">
-        <Card><CardHead title="Scheduled work" detail="A job is overdue after three expected intervals, with a ten-minute minimum." action={<button className="text-link" onClick={() => setParam("tab", "jobs")}>View history</button>} />
+        <Card className="operations-panel"><CardHead title="Scheduled work" detail="A job is overdue after three expected intervals, with a ten-minute minimum." action={<button className="text-link" onClick={() => setParam("tab", "jobs")}>View history <ChevronRight /></button>} />
           <div className="operations-status-list">{value.jobs.filter((job) => job.name !== "scheduler").map((job) => <button key={job.name} onClick={() => setParam("job", job.name)}><span><strong>{job.name}</strong><small>{job.category} · every {durationLabel(job.interval_seconds)}</small></span><Badge tone={job.unhealthy ? "warning" : job.last_status === "success" ? "success" : "neutral"}>{job.overdue ? "overdue" : job.last_status}</Badge></button>)}</div>
         </Card>
-        <Card><CardHead title="Queues" detail="Oldest pending work is evaluated against the configured warning age." />
-          {Object.entries(value.queues).map(([name, queue]) => <div className="setting-row" key={name}><div><strong>{name}</strong><p>{queue.depth} pending · oldest {durationLabel(queue.oldest_age_seconds)}</p></div><Badge tone={queue.warning ? "warning" : "success"}>{queue.warning ? "delayed" : "healthy"}</Badge></div>)}
+        <Card className="operations-panel"><CardHead title="Queues" detail="Oldest pending work is evaluated against the configured warning age." />
+          <div className="operations-queue-list">{Object.entries(value.queues).map(([name, queue]) => <div className="setting-row" key={name}><div><strong>{name}</strong><p>{queue.depth} pending · oldest {durationLabel(queue.oldest_age_seconds)}</p></div><Badge tone={queue.warning ? "warning" : "success"}>{queue.warning ? "delayed" : "healthy"}</Badge></div>)}</div>
         </Card>
-        <Card><CardHead title="Retention" detail={`${eligible} rows currently eligible across managed datasets.`} action={<button className="text-link" onClick={() => setParam("tab", "retention")}>Review</button>} />
+        <Card className="operations-panel"><CardHead title="Retention" detail={`${eligible} rows currently eligible across managed datasets.`} action={<button className="text-link" onClick={() => setParam("tab", "retention")}>Review <ChevronRight /></button>} />
           {retention.data?.raw_flow_cleanup_blocked && <div className="notice-bar warning"><AlertTriangle /><span>Raw-flow cleanup is blocked until aggregate coverage reaches the retention boundary.</span></div>}
-          <p className="muted">Cleanup is advisory-locked and records an immutable result.</p>
+          <p className="operations-panel-note">Cleanup is advisory-locked and records an immutable result.</p>
         </Card>
-        <Card><CardHead title="Recovery evidence" detail="Backups are useful only after an isolated restore drill." action={<button className="text-link" onClick={() => setParam("tab", "backups")}>View drills</button>} />
-          <div className="setting-row"><div><strong>{value.backup.configured ? "Verification recorded" : "Not configured"}</strong><p>{value.backup.latest_verified_at ? `Latest ${relativeTime(value.backup.latest_verified_at)}` : "Run make verify-backup FILE=…"}</p></div><Badge tone={!value.backup.configured ? "neutral" : value.backup.stale ? "warning" : "success"}>{!value.backup.configured ? "opt in" : value.backup.stale ? "stale" : "current"}</Badge></div>
+        <Card className="operations-panel"><CardHead title="Recovery evidence" detail="Backups are useful only after an isolated restore drill." action={<button className="text-link" onClick={() => setParam("tab", "backups")}>View drills <ChevronRight /></button>} />
+          <div className="operations-recovery-row"><div><strong>{value.backup.configured ? "Verification recorded" : "Not configured"}</strong><p>{value.backup.latest_verified_at ? `Latest ${relativeTime(value.backup.latest_verified_at)}` : "Run make verify-backup FILE=…"}</p></div><Badge tone={!value.backup.configured ? "neutral" : value.backup.stale ? "warning" : "success"}>{!value.backup.configured ? "opt in" : value.backup.stale ? "stale" : "current"}</Badge></div>
         </Card>
       </div>
     </>}
