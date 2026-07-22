@@ -208,7 +208,7 @@ async def seed_demo_reports(session: AsyncSession) -> None:
             "source_freshness": {"devices": (now - timedelta(minutes=4)).isoformat()},
         },
         "aggregate_coverage": {},
-        "retention": {"hourly_days": 90, "daily_days": 400, "raw_flow_days": 30},
+        "retention": {"hourly_days": 90, "daily_days": 400, "raw_flow_days": 7},
         "evidence_sha256": hashlib.sha256(b"tailview-demo-report").hexdigest(),
     }
     completed = ReportRun(

@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     policy_interval_seconds: int = 300
     flow_interval_seconds: int = 60
     audit_interval_seconds: int = 300
-    flow_retention_days: int = 30
+    flow_retention_days: int = 7
     raw_payload_retention_days: int = 7
     device_history_retention_days: int = Field(default=365, ge=30, le=3650)
     telemetry_retention_days: int = Field(default=30, ge=1, le=365)

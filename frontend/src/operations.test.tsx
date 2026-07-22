@@ -31,7 +31,7 @@ describe("operations center", () => {
     vi.spyOn(apiModule, "request").mockImplementation(async (path) => {
       if (path === "/operations/summary") return summary as never;
       if (path === "/operations/storage") return { database_bytes: 1024, relations: [], counts: {}, host_capacity_reported: false } as never;
-      if (path === "/operations/retention") return { as_of: summary.generated_at, eligible: { raw_flows: 0 }, raw_flow_cleanup_blocked: true, aggregate_coverage: {}, retention_days: { raw_flows: 30 } } as never;
+      if (path === "/operations/retention") return { as_of: summary.generated_at, eligible: { raw_flows: 0 }, raw_flow_cleanup_blocked: true, aggregate_coverage: {}, retention_days: { raw_flows: 7 } } as never;
       if (path === "/operations/backups") return { items: [{ id: "backup-1", filename: "tailview.dump", content_hash: "a".repeat(64), size: 1024, status: "success", postgres_version: "17.5", migration_revision: "0014_v1_completion", checks: { restore: true }, error_class: "", verified_at: summary.backup.latest_verified_at }] } as never;
       throw new Error(`Unexpected request ${path}`);
     });
