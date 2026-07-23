@@ -996,7 +996,7 @@ async def seed_demo(session: AsyncSession) -> None:
             content_hash=hashlib.sha256(b"synthetic-demo-backup").hexdigest(),
             size=8_388_608,
             status="success",
-            postgres_version="17.5",
+            postgres_version="17.10",
             migration_revision="0014_v1_completion",
             checks={
                 "restore": True,

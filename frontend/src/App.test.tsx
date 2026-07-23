@@ -210,7 +210,7 @@ describe("TailView", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={queryClient}><MemoryRouter><AccountSecurity user={{ username: "viewer", role: "viewer", mfa_enabled: false, mfa_required: false }} /></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByText("Account security")).toBeTruthy();
-    expect(screen.getByText("Firefox on Linux")).toBeTruthy();
+    expect(await screen.findByText("Firefox on Linux")).toBeTruthy();
     expect(screen.getByText("Current")).toBeTruthy();
     request.mockRestore();
   });
@@ -226,7 +226,7 @@ describe("TailView", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={queryClient}><MemoryRouter><TailViewAccess /></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByText("TailView access")).toBeTruthy();
-    expect(screen.getByText("Local Viewer")).toBeTruthy();
+    expect(await screen.findByText("Local Viewer")).toBeTruthy();
     expect(screen.getByText("Password change required")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Change role" }).classList.contains("button")).toBe(true);
     expect(screen.getByRole("button", { name: "Change role" }).classList.contains("ghost")).toBe(true);

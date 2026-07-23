@@ -11,12 +11,12 @@ jobs:
   backend:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
-          version: "0.7.19"
+          version: "0.11.31"
           enable-cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13.14"
       - working-directory: backend
@@ -31,13 +31,13 @@ jobs:
         working-directory: backend
         run: |
           uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/tailview-requirements.txt
-          uvx --from pip-audit==2.9.0 pip-audit --require-hashes --requirement /tmp/tailview-requirements.txt
+          uvx --from pip-audit==2.10.1 pip-audit --require-hashes --requirement /tmp/tailview-requirements.txt
 
   migrations:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa
+        image: postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
         env:
           POSTGRES_DB: tailview_migrations
           POSTGRES_USER: tailview
@@ -52,12 +52,12 @@ jobs:
     env:
       DATABASE_URL: postgresql+psycopg://tailview:migration-test-password@127.0.0.1:5432/tailview_migrations
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
-          version: "0.7.19"
+          version: "0.11.31"
           enable-cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13.14"
       - working-directory: backend
@@ -77,12 +77,13 @@ jobs:
   frontend:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "24.18.0"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - run: npm install --global npm@12.0.1
       - working-directory: frontend
         run: npm ci
       - working-directory: frontend
@@ -97,7 +98,7 @@ jobs:
   containers:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure smoke environment
         run: |
           cp .env.example .env
@@ -119,7 +120,7 @@ jobs:
   browser:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure demo browser environment
         run: |
           cp .env.example .env
@@ -133,26 +134,26 @@ jobs:
   secret-scan:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Scan repository history for secrets
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release-tooling:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate release and promotion workflows
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \
-            rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
       - name: Validate soak shell tooling
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \
-            koalaman/shellcheck-alpine:v0.10.0@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
+            koalaman/shellcheck-alpine:v0.11.0@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002 \
             shellcheck -x deploy/soak-common.sh deploy/soak-start.sh deploy/soak-login.sh \
             deploy/soak-check.sh deploy/soak-restart.sh deploy/soak-finish.sh
       - name: Validate release safety rules and isolated Compose

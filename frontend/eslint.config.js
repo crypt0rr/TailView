@@ -14,6 +14,12 @@ export default tseslint.config(
     rules: {
       ...reactHooks.configs.recommended.rules,
       "@typescript-eslint/no-explicit-any": "off",
+      // React Hooks 7 enables compiler-oriented rules that require architectural
+      // rewrites. Keep the established runtime-safe hook rules for v1.0 and
+      // migrate these patterns separately.
+      "react-hooks/purity": "off",
+      "react-hooks/refs": "off",
+      "react-hooks/set-state-in-effect": "off",
       "react-refresh/only-export-components": "off",
     },
   },

@@ -94,8 +94,12 @@ describe("network reports", () => {
       throw new Error(`Unexpected request ${path}`);
     });
     renderReports("administrator");
-    fireEvent.change(await screen.findByLabelText("Report saved Flow view"), { target: { value: "view-1" } });
-    fireEvent.click(screen.getByRole("button", { name: /Queue report/ }));
+    const viewSelect = await screen.findByLabelText("Report saved Flow view");
+    await screen.findByRole("option", { name: "Gateway · admin" });
+    fireEvent.change(viewSelect, { target: { value: "view-1" } });
+    const queueButton = screen.getByRole("button", { name: /Queue report/ });
+    await waitFor(() => expect(queueButton).not.toBeDisabled());
+    fireEvent.click(queueButton);
     await waitFor(() => expect(request).toHaveBeenCalledWith(
       "/reports/generate",
       expect.objectContaining({ method: "POST" }),

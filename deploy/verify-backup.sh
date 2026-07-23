@@ -52,7 +52,7 @@ fi
 docker network create "$network" >/dev/null
 docker run -d --name "$container" --network "$network" \
   -e POSTGRES_DB=tailview_verify -e POSTGRES_USER=tailview_verify -e POSTGRES_PASSWORD="$password" \
-  postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa >/dev/null
+  postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193 >/dev/null
 
 attempt=0
 until docker logs "$container" 2>&1 | grep -q "PostgreSQL init process complete"; do

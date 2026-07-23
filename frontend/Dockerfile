@@ -1,4 +1,5 @@
 FROM node:24.18.0-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd AS builder
+RUN npm install --global npm@12.0.1
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -6,6 +7,7 @@ COPY . .
 RUN npm run build
 
 FROM mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48 AS e2e
+RUN npm install --global npm@12.0.1
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

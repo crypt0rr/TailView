@@ -31,7 +31,7 @@ jobs:
     environment: stable-release
     steps:
       - name: Check out complete signed-tag history
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.stable_tag }}
