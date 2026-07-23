@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "0.11.31"
           enable-cache: true
@@ -53,7 +53,7 @@ jobs:
       DATABASE_URL: postgresql+psycopg://tailview:migration-test-password@127.0.0.1:5432/tailview_migrations
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           version: "0.11.31"
           enable-cache: true
