@@ -115,6 +115,7 @@ def test_stable_workflow_cannot_build_and_rc_workflow_cannot_move_latest() -> No
     assert "docker/build-push-action" not in stable
     assert "docker build " not in stable
     assert 'tags:\n      - "v*.*.*-rc.*"' in candidate
+    assert "aquasecurity/trivy-action@v0.36.0" in candidate
     assert '"${IMAGE}:latest"' not in candidate
 
 

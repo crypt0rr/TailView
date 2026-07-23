@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hmac
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from fastapi import Depends, HTTPException, Request, Response, status
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -427,7 +428,7 @@ async def revoke_user_sessions(
     )
     if except_session_id:
         statement = statement.where(Session.id != except_session_id)
-    result = await db.execute(statement)
+    result = cast(CursorResult[Any], await db.execute(statement))
     return int(result.rowcount or 0)
 
 
