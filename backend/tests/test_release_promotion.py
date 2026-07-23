@@ -121,6 +121,12 @@ def test_stable_workflow_cannot_build_and_rc_workflow_cannot_move_latest() -> No
     assert '"${IMAGE}:latest"' not in candidate
 
 
+def test_candidate_acceptance_downloads_a_completed_report() -> None:
+    candidate = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "/api/v1/reports?status=completed&limit=1" in candidate
+    assert 'json.load(open("/tmp/reports.json"))["items"][0]["id"]' in candidate
+
+
 def test_backup_drill_uses_the_running_compose_backend_image() -> None:
     script = (ROOT / "deploy" / "verify-backup.sh").read_text(encoding="utf-8")
     assert "PostgreSQL init process complete" in script
