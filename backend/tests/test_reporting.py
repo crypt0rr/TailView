@@ -106,6 +106,28 @@ async def test_aggregate_rebuild_is_exact_and_captures_late_records(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_daily_aggregate_accumulates_bounded_hourly_slices(db) -> None:
+    now = datetime(2026, 7, 22, 23, 30, tzinfo=UTC)
+    db.add_all(
+        [
+            flow("morning", now.replace(hour=1), byte_count=100),
+            flow("evening", now.replace(hour=22), byte_count=250),
+        ]
+    )
+    await db.commit()
+
+    await rebuild_aggregate_range(db, "daily", now.replace(hour=0), now + timedelta(hours=1))
+    await db.commit()
+
+    rows = (await db.scalars(select(FlowAggregate))).all()
+    assert len(rows) == 1
+    assert rows[0].granularity == "daily"
+    assert rows[0].reported_bytes == 700
+    assert rows[0].reported_packets == 10
+    assert rows[0].record_count == 2
+
+
+@pytest.mark.asyncio
 async def test_aggregate_filters_match_report_dimensions(db) -> None:
     now = datetime(2026, 7, 22, 12, tzinfo=UTC)
     db.add_all(

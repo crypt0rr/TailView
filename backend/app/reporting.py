@@ -30,7 +30,9 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import case, delete, func, literal, or_, select, text
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import Settings, get_settings
@@ -138,84 +140,140 @@ async def rebuild_aggregate_range(
         )
         .execution_options(synchronize_session=False)
     )
-    rows = (
-        await session.execute(
-            select(
-                Flow.start,
-                Flow.source_device_id,
-                Flow.destination_device_id,
-                Flow.source,
-                Flow.destination,
-                Flow.category,
-                Flow.protocol,
-                Flow.source_port,
-                Flow.destination_port,
-                Flow.tx_bytes + Flow.rx_bytes,
-                Flow.tx_packets + Flow.rx_packets,
-            ).where(Flow.start >= start, Flow.start < end)
-        )
-    ).all()
     service_addresses = await _service_addresses(session)
-    grouped: dict[tuple[Any, ...], list[int]] = {}
-    for row in rows:
-        (
-            started,
-            source_id,
-            destination_id,
-            source_raw,
-            destination_raw,
-            category,
-            protocol,
-            source_port,
-            destination_port,
-            byte_count,
-            packet_count,
-        ) = row
-        key = (
-            floor_bucket(started, granularity),
-            source_id or "",
-            destination_id or "",
-            source_raw or "",
-            destination_raw or "",
-            service_addresses.get(source_raw or "", "") if not source_id else "",
-            service_addresses.get(destination_raw or "", "") if not destination_id else "",
-            category or "unknown",
-            int(protocol) if protocol is not None else -1,
-            int(source_port) if source_port is not None else -1,
-            int(destination_port) if destination_port is not None else -1,
-            bool(source_id and destination_id),
+    source_id = func.coalesce(Flow.source_device_id, "")
+    destination_id = func.coalesce(Flow.destination_device_id, "")
+    source_raw = func.coalesce(Flow.source, "")
+    destination_raw = func.coalesce(Flow.destination, "")
+    source_service = (
+        case(
+            *[
+                (Flow.source == address, service_id)
+                for address, service_id in service_addresses.items()
+            ],
+            else_="",
         )
-        totals = grouped.setdefault(key, [0, 0, 0])
-        totals[0] += int(byte_count or 0)
-        totals[1] += int(packet_count or 0)
-        totals[2] += 1
-    now = datetime.now(UTC)
-    session.add_all(
-        [
-            FlowAggregate(
-                granularity=granularity,
-                bucket_start=key[0],
-                source_device_id=key[1],
-                destination_device_id=key[2],
-                source_raw=key[3],
-                destination_raw=key[4],
-                source_service_id=key[5],
-                destination_service_id=key[6],
-                category=key[7],
-                protocol=key[8],
-                source_port=key[9],
-                destination_port=key[10],
-                resolved=key[11],
-                reported_bytes=totals[0],
-                reported_packets=totals[1],
-                record_count=totals[2],
-                updated_at=now,
-            )
-            for key, totals in grouped.items()
-        ]
+        if service_addresses
+        else literal("")
     )
+    destination_service = (
+        case(
+            *[
+                (Flow.destination == address, service_id)
+                for address, service_id in service_addresses.items()
+            ],
+            else_="",
+        )
+        if service_addresses
+        else literal("")
+    )
+    source_service_id = case((source_id == "", source_service), else_="")
+    destination_service_id = case((destination_id == "", destination_service), else_="")
+    category = func.coalesce(Flow.category, "unknown")
+    protocol = func.coalesce(Flow.protocol, -1)
+    source_port = func.coalesce(Flow.source_port, -1)
+    destination_port = func.coalesce(Flow.destination_port, -1)
+    resolved = (source_id != "") & (destination_id != "")
+    dimensions = (
+        "granularity",
+        "bucket_start",
+        "source_device_id",
+        "destination_device_id",
+        "source_raw",
+        "destination_raw",
+        "source_service_id",
+        "destination_service_id",
+        "category",
+        "protocol",
+        "source_port",
+        "destination_port",
+        "resolved",
+    )
+    columns = (
+        *dimensions,
+        "reported_bytes",
+        "reported_packets",
+        "record_count",
+        "updated_at",
+    )
+    dialect = session.get_bind().dialect.name
+    insert_factory = sqlite_insert if dialect == "sqlite" else postgresql_insert
+    now = datetime.now(UTC)
+
+    bucket = start
+    while bucket < end:
+        bucket_end = min(bucket + bucket_step(granularity), end)
+        # Daily buckets are accumulated one hour at a time. This bounds both
+        # database working memory and the number of rows materialized by any
+        # single GROUP BY, even during the initial multi-million-row backfill.
+        slice_start = bucket
+        while slice_start < bucket_end:
+            slice_end = min(slice_start + timedelta(hours=1), bucket_end)
+            grouped = (
+                select(
+                    literal(granularity),
+                    literal(bucket),
+                    source_id,
+                    destination_id,
+                    source_raw,
+                    destination_raw,
+                    source_service_id,
+                    destination_service_id,
+                    category,
+                    protocol,
+                    source_port,
+                    destination_port,
+                    resolved,
+                    func.coalesce(func.sum(Flow.tx_bytes + Flow.rx_bytes), 0),
+                    func.coalesce(func.sum(Flow.tx_packets + Flow.rx_packets), 0),
+                    func.count(Flow.id),
+                    literal(now),
+                )
+                .where(Flow.start >= slice_start, Flow.start < slice_end)
+                .group_by(
+                    source_id,
+                    destination_id,
+                    source_raw,
+                    destination_raw,
+                    source_service_id,
+                    destination_service_id,
+                    category,
+                    protocol,
+                    source_port,
+                    destination_port,
+                    resolved,
+                )
+            )
+            statement = insert_factory(FlowAggregate).from_select(columns, grouped)
+            if granularity == "daily":
+                excluded = statement.excluded
+                statement = statement.on_conflict_do_update(
+                    index_elements=list(dimensions),
+                    set_={
+                        "reported_bytes": FlowAggregate.reported_bytes
+                        + excluded.reported_bytes,
+                        "reported_packets": FlowAggregate.reported_packets
+                        + excluded.reported_packets,
+                        "record_count": FlowAggregate.record_count + excluded.record_count,
+                        "updated_at": excluded.updated_at,
+                    },
+                )
+            await session.execute(statement)
+            slice_start = slice_end
+        bucket = bucket_end
     await session.flush()
-    return len(grouped)
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(FlowAggregate)
+            .where(
+                FlowAggregate.granularity == granularity,
+                FlowAggregate.bucket_start >= start,
+                FlowAggregate.bucket_start < end,
+            )
+        )
+        or 0
+    )
 
 
 async def update_flow_aggregates(
