@@ -140,6 +140,18 @@ async def test_retention_never_expires_raw_flows_before_aggregate_coverage(datab
 
 
 @pytest.mark.asyncio
+async def test_cleanup_persists_json_safe_retention_preview(database) -> None:
+    result = await operations.run_cleanup("test")
+
+    assert result.status == "success"
+    async with database() as session:
+        stored = await session.get(CleanupRun, result.id)
+        assert stored is not None
+        assert isinstance(stored.preview["as_of"], str)
+        assert stored.error_class == ""
+
+
+@pytest.mark.asyncio
 async def test_operations_findings_require_persistent_failures(database) -> None:
     now = datetime.now(UTC)
     async with database() as session:

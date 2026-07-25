@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
+from fastapi.encoders import jsonable_encoder
 from prometheus_client import Gauge, Histogram
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -377,7 +378,7 @@ async def run_cleanup(trigger: str = "scheduled") -> CleanupRun:
         await session.commit()
         try:
             preview = await retention_snapshot(session, settings)
-            record.preview = preview
+            record.preview = jsonable_encoder(preview)
             before = dict(preview["eligible"])
             await cleanup_flow_data(session, settings, datetime.now(UTC))
             now = datetime.now(UTC)

@@ -1174,6 +1174,13 @@ async def _log_streaming_worker(session: AsyncSession, client: TailscaleClient) 
             continue
         configuration = item.get("configuration", {})
         status_body = item.get("status", {})
+        if not configuration and not status_body:
+            existing = await session.get(LogStreamingConfiguration, log_type)
+            if existing:
+                await session.delete(existing)
+                await session.commit()
+            succeeded += 1
+            continue
         destination = str(
             configuration.get("url")
             or configuration.get("endpoint")
