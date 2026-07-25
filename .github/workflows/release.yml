@@ -90,7 +90,7 @@ jobs:
           npm run lint
           npm test
           npm run build
-          npm audit --omit=dev
+          npm run audit:production
 
       - name: Verify production Compose definitions
         run: |

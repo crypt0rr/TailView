@@ -125,6 +125,40 @@ async def test_webhook_client_accepts_null_as_an_empty_inventory() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_device_invites_accept_null_as_an_empty_inventory() -> None:
+    route = respx.get(
+        "https://api.tailscale.com/api/v2/device/n1/device-invites"
+    ).mock(
+        return_value=httpx.Response(
+            200, content=b"null", headers={"content-type": "application/json"}
+        )
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert await client.device_invites("n1") == []
+    assert route.called
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_log_streaming_accepts_unconfigured_resources() -> None:
+    prefix = "https://api.tailscale.com/api/v2/tailnet/example.com/logging/network"
+    stream = respx.get(f"{prefix}/stream").mock(
+        return_value=httpx.Response(404, json={"message": "not configured"})
+    )
+    status = respx.get(f"{prefix}/status").mock(
+        return_value=httpx.Response(404, json={"message": "not configured"})
+    )
+    client = TailscaleClient("example.com", api_token="test-token")
+
+    assert await client.log_streaming("network") == {"configuration": {}, "status": {}}
+    assert stream.called and status.called
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_webhook_client_rejects_an_unexpected_collection_shape() -> None:
     route = respx.get("https://api.tailscale.com/api/v2/tailnet/example.com/webhooks")
     route.mock(return_value=httpx.Response(200, json={"webhooks": "not-a-list"}))

@@ -93,7 +93,7 @@ jobs:
       - working-directory: frontend
         run: npm run build
       - working-directory: frontend
-        run: npm audit --omit=dev
+        run: npm run audit:production
 
   containers:
     runs-on: ubuntu-24.04
