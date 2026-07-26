@@ -91,6 +91,9 @@ def command_snapshot(args: argparse.Namespace) -> None:
         and scheduler.get("unhealthy") is False
         and scheduler.get("last_status") in {"success", "running"}
     )
+    operations_ok = (
+        operations.get("status") == "healthy" and operations.get("degraded_jobs") == 0
+    )
     report_download = None
     if args.report_sha256 and args.report_size is not None:
         report_download = {"sha256": args.report_sha256, "size": args.report_size}
@@ -98,11 +101,12 @@ def command_snapshot(args: argparse.Namespace) -> None:
         "schema_version": 1,
         "captured_at": utc_now(),
         "captured_epoch": int(time.time()),
-        "passed": bool(identity_ok and scheduler_ok and queue_healthy),
+        "passed": bool(identity_ok and scheduler_ok and queue_healthy and operations_ok),
         "checks": {
             "identity": identity_ok,
             "scheduler": scheduler_ok,
             "queues": queue_healthy,
+            "operations": operations_ok,
             "report_download": report_download is not None,
         },
         "readiness": readiness,
