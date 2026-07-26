@@ -6,7 +6,8 @@ require_candidate
 test -f "$SOAK_EVIDENCE_DIR/state.json" || { echo "Run soak-start first" >&2; exit 2; }
 test -f "$SOAK_COOKIE_JAR" || { echo "Run soak-login first" >&2; exit 2; }
 runtime="$SOAK_EVIDENCE_DIR/runtime"
-mkdir -p "$runtime" "$SOAK_EVIDENCE_DIR/checks"
+checks="$SOAK_EVIDENCE_DIR/checks"
+mkdir -p "$runtime" "$checks"
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 wait_ready "$runtime/readiness-${stamp}.json"
 
@@ -31,6 +32,7 @@ if test -n "$report_id"; then
   report_size=$(wc -c < "$report_tmp" | tr -d ' ')
   report_args="--report-sha256 $report_sha --report-size $report_size"
 fi
+snapshot="$runtime/check-${stamp}.json"
 # shellcheck disable=SC2086
 python3 deploy/soak_evidence.py snapshot \
   --state "$SOAK_EVIDENCE_DIR/state.json" --readiness "$runtime/readiness-${stamp}.json" \
@@ -38,6 +40,13 @@ python3 deploy/soak_evidence.py snapshot \
   --retention "$runtime/retention-${stamp}.json" --capabilities "$runtime/capabilities-${stamp}.json" \
   --sync "$runtime/sync-${stamp}.json" --reports "$runtime/reports-${stamp}.json" \
   --findings "$runtime/findings-${stamp}.json" \
-  $report_args --output "$SOAK_EVIDENCE_DIR/checks/${stamp}.json"
+  $report_args --output "$snapshot"
 test ! -f "$runtime/report-${stamp}.json" || rm -f "$runtime/report-${stamp}.json"
+if ! python3 -c 'import json,sys; raise SystemExit(0 if json.load(open(sys.argv[1]))["passed"] else 1)' "$snapshot"; then
+  failed="$runtime/failed-check-${stamp}.json"
+  mv "$snapshot" "$failed"
+  echo "Soak checkpoint failed; diagnostic evidence preserved at $failed" >&2
+  exit 1
+fi
+mv "$snapshot" "$checks/${stamp}.json"
 echo "Soak evidence captured: $stamp"

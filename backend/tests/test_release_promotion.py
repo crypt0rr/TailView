@@ -305,3 +305,16 @@ def test_soak_snapshot_rejects_degraded_operations(tmp_path: Path) -> None:
     check = json.loads(output.read_text(encoding="utf-8"))
     assert check["passed"] is False
     assert check["checks"]["operations"] is False
+
+
+def test_soak_check_only_promotes_passing_snapshots() -> None:
+    script = (ROOT / "deploy" / "soak-check.sh").read_text(encoding="utf-8")
+    snapshot_output = '$report_args --output "$snapshot"'
+    failure_guard = 'json.load(open(sys.argv[1]))["passed"]'
+    promote = 'mv "$snapshot" "$checks/${stamp}.json"'
+
+    assert snapshot_output in script
+    assert failure_guard in script
+    assert 'failed-check-${stamp}.json' in script
+    assert script.index(snapshot_output) < script.index(failure_guard) < script.index(promote)
+    assert '--output "$SOAK_EVIDENCE_DIR/checks/${stamp}.json"' not in script
