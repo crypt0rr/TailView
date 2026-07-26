@@ -141,7 +141,7 @@ jobs:
             rc_digest="$(docker buildx imagetools inspect "${image}:${CANDIDATE_TAG#v}" | awk '/^Digest:/ {print $2; exit}')"
             test "$rc_digest" = "$digest"
             gh attestation verify "oci://${image}@${digest}" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
               --source-digest "$CANDIDATE_COMMIT"
           done
 
