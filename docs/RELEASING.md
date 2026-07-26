@@ -40,6 +40,8 @@ make soak-finish CANDIDATE=v1.0.0-rc.1 ENV_FILE=.env.soak \
 
 The scripts always use a separate `tailview-soak` Compose project, port `18080`, network, and named PostgreSQL volume. They reject `.env` and the live `tailview` project name. Telemetry is not started. `soak-finish` requires at least 24 hours, three successful captures, a controlled restart, an authenticated report download, and a release-owner signature. Failed evidence is retained; fix the issue on a new commit and publish the next RC.
 
+`soak-check` preserves a failed or warming snapshot under the evidence `runtime` directory and exits non-zero. Only passing snapshots are promoted into the signed `checks` set, so operators get the complete diagnostic record without accidentally counting a failed capture toward release approval.
+
 ## Stable promotion
 
 Configure a protected GitHub environment named `stable-release` and the repository variables `RELEASE_GPG_PUBLIC_KEY` and `RELEASE_GPG_FINGERPRINT`. After the signed soak evidence is attached to the RC release, create the stable tag on the identical commit. The tag message must bind the candidate and SHA-256 of the signed evidence manifest:
