@@ -11,7 +11,7 @@ dependencies = [
   "fastapi==0.140.0",
   "httpx==0.28.1",
   "json5==0.15.0",
-  "prometheus-client==0.25.0",
+  "prometheus-client==0.26.0",
   "psycopg[binary,pool]==3.3.4",
   "pydantic-settings==2.14.2",
   "reportlab==5.0.0",
