@@ -217,6 +217,8 @@ class TailscaleClient:
     async def device_invites(self, device_id: str) -> list[dict[str, Any]]:
         encoded = quote(device_id, safe="")
         body = await self.get(f"/device/{encoded}/device-invites")
+        if body is None:
+            return []
         if isinstance(body, list):
             return [dict(item) for item in body if isinstance(item, dict)]
         if not isinstance(body, dict):
@@ -234,13 +236,23 @@ class TailscaleClient:
 
     async def log_streaming(self, log_type: str) -> dict[str, Any]:
         encoded = quote(log_type, safe="")
+
+        async def optional(path: str) -> dict[str, Any]:
+            try:
+                body = await self.get(path)
+            except TailscaleError as exc:
+                if exc.status == 404:
+                    return {}
+                raise
+            return dict(body) if isinstance(body, dict) else {}
+
         configuration, status = await asyncio.gather(
-            self.get(f"/tailnet/{self.tailnet}/logging/{encoded}/stream"),
-            self.get(f"/tailnet/{self.tailnet}/logging/{encoded}/status"),
+            optional(f"/tailnet/{self.tailnet}/logging/{encoded}/stream"),
+            optional(f"/tailnet/{self.tailnet}/logging/{encoded}/status"),
         )
         return {
-            "configuration": configuration if isinstance(configuration, dict) else {},
-            "status": status if isinstance(status, dict) else {},
+            "configuration": configuration,
+            "status": status,
         }
 
 

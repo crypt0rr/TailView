@@ -246,3 +246,62 @@ def test_soak_finalization_requires_restart_checks_and_report(tmp_path: Path) ->
     evidence = json.loads((output / "tailview-1.0.0-rc.1-soak.json").read_text())
     assert evidence["result"] == "go"
     assert (output / "tailview-1.0.0-rc.1-SHA256SUMS").is_file()
+
+
+def test_soak_snapshot_rejects_degraded_operations(tmp_path: Path) -> None:
+    state = tmp_path / "state.json"
+    output = tmp_path / "check.json"
+    inputs = {
+        "readiness": {
+            "status": "ready",
+            "version": {"application": "1.0.0", "revision": "a" * 40},
+            "schema": {
+                "current": ["0014_v1_completion"],
+                "expected": ["0014_v1_completion"],
+            },
+        },
+        "operations": {
+            "status": "degraded",
+            "degraded_jobs": 1,
+            "scheduler": {"unhealthy": False, "last_status": "success"},
+            "queues": {
+                "notifications": {"warning": False},
+                "reports": {"warning": False},
+            },
+        },
+        "capabilities": {},
+        "sync": {},
+        "reports": {},
+        "findings": {},
+        "retention": {},
+        "storage": {},
+    }
+    state.write_text(
+        json.dumps(
+            {
+                "core_version": "1.0.0",
+                "source_commit": "a" * 40,
+                "schema_revision": ["0014_v1_completion"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths = {}
+    for name, value in inputs.items():
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        paths[name] = path
+
+    soak_evidence.command_snapshot(
+        SimpleNamespace(
+            state=state,
+            output=output,
+            report_sha256=None,
+            report_size=None,
+            **paths,
+        )
+    )
+
+    check = json.loads(output.read_text(encoding="utf-8"))
+    assert check["passed"] is False
+    assert check["checks"]["operations"] is False
