@@ -15,6 +15,17 @@ class TailscaleError(RuntimeError):
         self.retry_after = retry_after
 
 
+def _log_collection(body: Any) -> list[dict[str, Any]]:
+    if not isinstance(body, dict):
+        raise TailscaleError(502, "Unexpected log response")
+    logs = body.get("logs")
+    if logs is None:
+        return []
+    if not isinstance(logs, list) or not all(isinstance(item, dict) for item in logs):
+        raise TailscaleError(502, "Unexpected log response")
+    return [dict(item) for item in logs]
+
+
 class TailscaleClient:
     base_url = "https://api.tailscale.com/api/v2"
 
@@ -143,14 +154,14 @@ class TailscaleClient:
             {"start": start.isoformat(), "end": end.isoformat()},
             read_timeout=90,
         )
-        return list(body.get("logs", []))
+        return _log_collection(body)
 
     async def audit(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
         body = await self.get(
             f"/tailnet/{self.tailnet}/logging/configuration",
             {"start": start.isoformat(), "end": end.isoformat()},
         )
-        return list(body.get("logs", []))
+        return _log_collection(body)
 
     async def services(self) -> list[dict[str, Any]]:
         body = await self.get(f"/tailnet/{self.tailnet}/services")

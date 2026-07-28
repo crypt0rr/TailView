@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import httpx
 import pytest
 import respx
@@ -137,6 +139,106 @@ async def test_device_invites_accept_null_as_an_empty_inventory() -> None:
 
     assert await client.device_invites("n1") == []
     assert route.called
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("flows", "network"),
+        ("audit", "configuration"),
+    ],
+)
+@pytest.mark.parametrize("payload", [{}, {"logs": None}])
+@respx.mock
+async def test_log_clients_accept_missing_and_null_collections(
+    method: str, path: str, payload: dict[str, object]
+) -> None:
+    route = respx.get(f"https://api.tailscale.com/api/v2/tailnet/example.com/logging/{path}")
+    route.mock(return_value=httpx.Response(200, json=payload))
+    client = TailscaleClient("example.com", api_token="test-token")
+    now = datetime.now(UTC)
+
+    assert await getattr(client, method)(now, now) == []
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("flows", "network"),
+        ("audit", "configuration"),
+    ],
+)
+@respx.mock
+async def test_log_clients_preserve_valid_object_collections(method: str, path: str) -> None:
+    route = respx.get(f"https://api.tailscale.com/api/v2/tailnet/example.com/logging/{path}")
+    route.mock(return_value=httpx.Response(200, json={"logs": [{"id": "event-1"}]}))
+    client = TailscaleClient("example.com", api_token="test-token")
+    now = datetime.now(UTC)
+
+    assert await getattr(client, method)(now, now) == [{"id": "event-1"}]
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("flows", "network"),
+        ("audit", "configuration"),
+    ],
+)
+@pytest.mark.parametrize(
+    "logs",
+    [
+        False,
+        "not-a-list",
+        {"id": "event-1"},
+        [{"id": "event-1"}, "not-an-object"],
+    ],
+)
+@respx.mock
+async def test_log_clients_reject_invalid_collection_shapes(
+    method: str, path: str, logs: object
+) -> None:
+    route = respx.get(f"https://api.tailscale.com/api/v2/tailnet/example.com/logging/{path}")
+    route.mock(return_value=httpx.Response(200, json={"logs": logs}))
+    client = TailscaleClient("example.com", api_token="test-token")
+    now = datetime.now(UTC)
+
+    with pytest.raises(TailscaleError, match="Unexpected log response"):
+        await getattr(client, method)(now, now)
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("flows", "network"),
+        ("audit", "configuration"),
+    ],
+)
+@pytest.mark.parametrize("payload", [None, [], "not-an-object"])
+@respx.mock
+async def test_log_clients_reject_invalid_envelopes(
+    method: str, path: str, payload: object
+) -> None:
+    route = respx.get(f"https://api.tailscale.com/api/v2/tailnet/example.com/logging/{path}")
+    response = (
+        httpx.Response(200, content=b"null", headers={"content-type": "application/json"})
+        if payload is None
+        else httpx.Response(200, json=payload)
+    )
+    route.mock(return_value=response)
+    client = TailscaleClient("example.com", api_token="test-token")
+    now = datetime.now(UTC)
+
+    with pytest.raises(TailscaleError, match="Unexpected log response"):
+        await getattr(client, method)(now, now)
     await client.close()
 
 
