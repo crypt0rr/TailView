@@ -976,6 +976,16 @@ def _credential_type(item: dict[str, Any], identifier: str) -> str:
     )
 
 
+def _string_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return None
+    return list(value)
+
+
+def _first_bool(*values: Any) -> bool | None:
+    return next((value for value in values if isinstance(value, bool)), None)
+
+
 async def _credentials_worker(session: AsyncSession, client: TailscaleClient) -> SourceResult:
     items = await client.keys()
     await session.execute(update(TailnetCredential).values(present=False, stale=False))
@@ -1000,16 +1010,22 @@ async def _credentials_worker(session: AsyncSession, client: TailscaleClient) ->
             if creator
             else None
         )
-        row.scopes = [str(value) for value in item.get("scopes", []) or []]
+        row.scopes = _string_list(item.get("scopes")) or []
         capabilities = item.get("capabilities", {})
         device_caps = capabilities.get("devices", {}) if isinstance(capabilities, dict) else {}
-        row.tags = [
-            str(value)
-            for value in item.get("tags", device_caps.get("create", {}).get("reusable", [])) or []
-        ]
-        row.reusable = item.get("reusable")
-        row.ephemeral = item.get("ephemeral")
-        row.preapproved = item.get("preauthorized", item.get("preApproved"))
+        create_caps = device_caps.get("create", {}) if isinstance(device_caps, dict) else {}
+        create_caps = create_caps if isinstance(create_caps, dict) else {}
+        top_level_tags = _string_list(item.get("tags"))
+        nested_tags = _string_list(create_caps.get("tags"))
+        row.tags = top_level_tags if top_level_tags is not None else nested_tags or []
+        row.reusable = _first_bool(item.get("reusable"), create_caps.get("reusable"))
+        row.ephemeral = _first_bool(item.get("ephemeral"), create_caps.get("ephemeral"))
+        row.preapproved = _first_bool(
+            item.get("preauthorized"),
+            item.get("preApproved"),
+            create_caps.get("preauthorized"),
+            create_caps.get("preApproved"),
+        )
         row.created_at = parse_time(item.get("created") or item.get("createdAt"))
         row.expires_at = parse_time(item.get("expires") or item.get("expiresAt"))
         row.revoked = item.get("revoked")
