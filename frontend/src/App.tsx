@@ -9,11 +9,13 @@ import {
 } from "react-router-dom";
 import {
   Activity,
+  AlertTriangle,
   Bookmark,
   Boxes,
   BellRing,
   ChevronRight,
   CircleUserRound,
+  Clock3,
   FileKey2,
   FileChartColumn,
   Gauge,
@@ -43,7 +45,7 @@ import { api, ApiError, request, type AuthResult, type CurrentUser } from "./api
 import { Button, Loading } from "./components";
 import { useTimeRange } from "./timeRange";
 import { useDialogFocus } from "./useDialogFocus";
-import type { SavedViewRecord } from "./types";
+import type { InitializationStatus, SavedViewRecord } from "./types";
 import {
   Dashboard,
   Devices,
@@ -118,6 +120,33 @@ type NavigationUsage = {
   detail: string;
   checked_at: string | null;
 };
+
+export function InitializationNotice({
+  initialization,
+  onOpenSynchronization,
+}: {
+  initialization: InitializationStatus | undefined;
+  onOpenSynchronization: () => void;
+}) {
+  if (!initialization || initialization.state === "ready") return null;
+  const attention = initialization.state === "attention";
+  return (
+    <div
+      className={`initialization-notice ${initialization.state}`}
+      role={attention ? "alert" : "status"}
+      aria-live={attention ? "assertive" : "polite"}
+    >
+      {attention ? <AlertTriangle /> : <Clock3 />}
+      <div>
+        <strong>{attention ? "Initial synchronization needs attention" : "Collecting initial tailnet data"}</strong>
+        <p>{initialization.detail}</p>
+      </div>
+      <Button variant="ghost" onClick={onOpenSynchronization}>
+        View synchronization
+      </Button>
+    </div>
+  );
+}
 
 const navigationCapabilities: Record<string, string> = {
   "/flows": "network_flow_logs",
@@ -434,9 +463,11 @@ export function Shell({
     queryFn: () => request<{
       items: CapabilityResult[];
       navigation: Record<string, NavigationUsage>;
+      initialization: InitializationStatus;
     }>("/capabilities"),
     staleTime: 30_000,
-    refetchInterval: 60_000,
+    refetchInterval: (query) =>
+      query.state.data?.initialization.state === "collecting" ? 10_000 : 60_000,
   });
   const findingSummary = useQuery({
     queryKey: ["findings-summary"],
@@ -610,21 +641,25 @@ export function Shell({
         </header>
         <CommandPalette items={visibleNav} />
         <main className="content">
+          <InitializationNotice
+            initialization={capabilities.data?.initialization}
+            onOpenSynchronization={() => navigate("/sync")}
+          />
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/topology" element={<Topology user={user} />} />
             <Route path="/flows" element={<Flows />} />
             <Route path="/reports" element={<Reports user={user} />} />
             <Route path="/operations" element={user.role === "administrator" ? <Operations /> : <Navigate to="/" replace />} />
-            <Route path="/devices" element={<Devices user={user} />} />
+            <Route path="/devices" element={<Devices user={user} initialization={capabilities.data?.initialization} />} />
             <Route path="/users" element={<InventoryPage kind="users" />} />
             <Route path="/groups" element={<InventoryPage kind="groups" />} />
             <Route path="/routes" element={<InventoryPage kind="routes" />} />
             <Route path="/services" element={<Services />} />
-            <Route path="/exit-nodes" element={<Devices role="exit_node" user={user} />} />
+            <Route path="/exit-nodes" element={<Devices role="exit_node" user={user} initialization={capabilities.data?.initialization} />} />
             <Route
               path="/subnet-routers"
-              element={<Devices role="subnet_router" user={user} />}
+              element={<Devices role="subnet_router" user={user} initialization={capabilities.data?.initialization} />}
             />
             <Route path="/tags" element={<InventoryPage kind="tags" />} />
             <Route path="/policy" element={<Policy />} />

@@ -946,6 +946,37 @@ aside nav .inactive-nav-item {
   max-width: 1600px;
   margin: auto;
 }
+.initialization-notice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 13px 15px;
+  border: 1px solid color-mix(in srgb, var(--purple) 35%, var(--border));
+  background: color-mix(in srgb, var(--purple) 8%, var(--surface));
+  border-radius: 10px;
+}
+.initialization-notice > svg {
+  width: 20px;
+  color: var(--purple);
+}
+.initialization-notice strong {
+  display: block;
+  font-size: 12px;
+}
+.initialization-notice p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.initialization-notice.attention {
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+.initialization-notice.attention > svg {
+  color: var(--warning);
+}
 .page {
   display: flex;
   flex-direction: column;
@@ -3077,6 +3108,13 @@ td small {
   }
   .content {
     padding: 18px 12px;
+  }
+  .initialization-notice {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .initialization-notice .button {
+    grid-column: 2;
+    justify-self: start;
   }
   .page-head {
     align-items: flex-start;

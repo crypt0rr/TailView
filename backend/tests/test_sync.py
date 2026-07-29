@@ -5,12 +5,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.sync as sync_module
+from app.config import Settings
 from app.models import (
     Base,
+    Credential,
     Device,
     DevicePostureAttribute,
     DevicePostureState,
     ServiceHost,
+    SyncJob,
     TailnetService,
     WebhookEndpoint,
 )
@@ -27,6 +30,7 @@ from app.sync import (
     preferred_device_id,
     redact,
     redact_webhook_url,
+    should_start_initial_inventory,
     split_endpoint,
 )
 from app.tailscale import TailscaleError
@@ -55,6 +59,81 @@ def test_endpoint_parser_handles_ipv4_ipv6_and_missing_ports() -> None:
 def test_rfc3339_time_parser() -> None:
     assert parse_time("2026-07-20T10:00:00Z") == datetime(2026, 7, 20, 10, tzinfo=UTC)
     assert parse_time(None) is None
+
+
+@pytest.mark.asyncio
+async def test_initial_inventory_runs_users_then_devices_through_instrumentation(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    async def source(name: str) -> None:
+        calls.append(name)
+
+    def instrument(
+        name: str,
+        _category: str,
+        _interval_seconds: int,
+        function,
+    ):
+        async def run() -> None:
+            calls.append(f"instrument:{name}")
+            await function()
+
+        return run
+
+    monkeypatch.setattr(sync_module, "instrument_job", instrument)
+    monkeypatch.setattr(sync_module, "sync_users", lambda: source("users"))
+    monkeypatch.setattr(sync_module, "sync_devices", lambda: source("devices"))
+
+    await sync_module.sync_initial_inventory()
+
+    assert calls == ["instrument:users", "users", "instrument:devices", "devices"]
+
+
+@pytest.mark.asyncio
+async def test_initial_inventory_is_only_primed_before_the_first_device_job() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    configured = Settings(
+        _env_file=None,
+        environment="test",
+        tailscale_tailnet="-",
+        tailscale_oauth_client_id="client",
+        tailscale_oauth_client_secret="secret",
+    )
+    missing = Settings(_env_file=None, environment="test", tailscale_tailnet="-")
+    async with factory() as session:
+        assert await should_start_initial_inventory(session, configured) is True
+        assert await should_start_initial_inventory(session, missing) is False
+
+        session.add(SyncJob(kind="devices", status="failed"))
+        await session.commit()
+
+        assert await should_start_initial_inventory(session, configured) is False
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stored_credentials_can_prime_initial_inventory() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        tailscale_tailnet="-",
+        TAILVIEW_ENCRYPTION_KEY="configured",
+    )
+    async with factory() as session:
+        session.add(Credential(kind="api_token", client_id=None, encrypted_secret=b"encrypted"))
+        await session.commit()
+
+        assert await should_start_initial_inventory(session, settings) is True
+    await engine.dispose()
 
 
 def test_address_index_matches_exact_addresses_and_omits_ambiguity() -> None:

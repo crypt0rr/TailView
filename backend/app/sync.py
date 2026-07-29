@@ -151,6 +151,35 @@ async def client_for(session: AsyncSession, settings: Settings) -> TailscaleClie
     )
 
 
+async def tailscale_credentials_configured(
+    session: AsyncSession, settings: Settings
+) -> bool:
+    """Return whether a real synchronization can obtain read-only credentials."""
+    if not settings.tailscale_tailnet:
+        return False
+    if settings.tailscale_api_token or settings.tailscale_oauth_client_secret:
+        return True
+    if not settings.encryption_key:
+        return False
+    return (
+        await session.scalar(select(Credential.id).order_by(Credential.created_at.desc()).limit(1))
+        is not None
+    )
+
+
+async def should_start_initial_inventory(session: AsyncSession, settings: Settings) -> bool:
+    """Prime only a genuinely new installation with usable Tailscale credentials."""
+    if not await tailscale_credentials_configured(session, settings):
+        return False
+    previous_device_job = await session.scalar(
+        select(SyncJob.id)
+        .where(SyncJob.kind == "devices")
+        .order_by(SyncJob.started_at.desc())
+        .limit(1)
+    )
+    return previous_device_job is None
+
+
 async def lock_job(key: int) -> AsyncConnection | None:
     """Acquire a session advisory lock on a pinned database connection."""
     connection = await engine.connect()
@@ -236,6 +265,23 @@ async def sync_inventory() -> None:
             log.exception("inventory_source_orchestration_failed", source=synchronize.__name__)
 
 
+async def sync_initial_inventory() -> None:
+    """Prime identity and device data in dependency order on a new installation."""
+    settings = get_settings()
+    for name, synchronize in (("users", sync_users), ("devices", sync_devices)):
+        try:
+            await instrument_job(
+                name,
+                "synchronization",
+                settings.inventory_interval_seconds,
+                synchronize,
+            )()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("initial_inventory_source_failed", source=name)
+
+
 SourceResult = tuple[int, int, int, dict[str, Any]]
 
 
@@ -264,15 +310,13 @@ async def _run_source(
         session.add(job)
         await session.commit()
         job_id = job.id
-        client = await client_for(session, settings)
-        if client is None:
-            job.status = "skipped"
-            job.error = "No Tailscale credentials configured"
-            job.finished_at = datetime.now(UTC)
-            await session.commit()
-            await unlock_job(lock, lock_key)
-            return
+        client: TailscaleClient | None = None
         try:
+            client = await client_for(session, settings)
+            if client is None:
+                job.status = "skipped"
+                job.error = "No Tailscale credentials configured"
+                return
             attempted, succeeded, failed, details = await worker(session, client)
             job.attempted = attempted
             job.succeeded = succeeded
@@ -293,6 +337,12 @@ async def _run_source(
             capability.checked_at = datetime.now(UTC)
             session.add(capability)
             await session.commit()
+        except asyncio.CancelledError:
+            await session.rollback()
+            job = await session.get(SyncJob, job_id) or SyncJob(id=job_id, kind=kind)
+            job.status = "cancelled"
+            job.error = "Synchronization cancelled"
+            raise
         except TailscaleError as exc:
             await session.rollback()
             job = await session.get(SyncJob, job_id) or SyncJob(id=job_id, kind=kind)
@@ -331,7 +381,8 @@ async def _run_source(
         finally:
             job.finished_at = datetime.now(UTC)
             await session.commit()
-            await client.close()
+            if client is not None:
+                await client.close()
             await unlock_job(lock, lock_key)
 
 
