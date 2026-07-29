@@ -598,6 +598,7 @@ export function Shell({
           <button
             className="icon-button mobile-only"
             onClick={() => setMobile(true)}
+            aria-label="Open navigation"
           >
             <Menu />
           </button>
