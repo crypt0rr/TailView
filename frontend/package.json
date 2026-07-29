@@ -2,7 +2,7 @@
   "name": "tailview-frontend",
   "private": true,
   "version": "1.0.0",
-  "packageManager": "npm@12.0.1",
+  "packageManager": "npm@12.0.2",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
