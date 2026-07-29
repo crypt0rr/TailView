@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import structlog
 from fastapi import FastAPI, Request
@@ -19,7 +20,7 @@ from .db import SessionLocal, engine
 from .demo import seed_demo
 from .operations import refresh_prometheus_metrics, scheduler_heartbeat
 from .security import SecretBox
-from .sync import create_scheduler
+from .sync import create_scheduler, should_start_initial_inventory, sync_initial_inventory
 
 log = structlog.get_logger()
 REQUESTS = Counter("tailview_http_requests_total", "HTTP requests", ["method", "status"])
@@ -36,11 +37,23 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         async with SessionLocal() as session:
             await seed_demo(session)
     scheduler = create_scheduler()
+    initialization_task: asyncio.Task[None] | None = None
     if not settings.demo_mode:
         scheduler.start()
         await scheduler_heartbeat()
+        async with SessionLocal() as session:
+            if await should_start_initial_inventory(session, settings):
+                initialization_task = asyncio.create_task(
+                    sync_initial_inventory(),
+                    name="tailview-initial-inventory",
+                )
     _app.state.scheduler = scheduler
+    _app.state.initialization_task = initialization_task
     yield
+    if initialization_task is not None and not initialization_task.done():
+        initialization_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await initialization_task
     if scheduler.running:
         scheduler.shutdown(wait=False)
     await engine.dispose()

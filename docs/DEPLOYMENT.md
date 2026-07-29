@@ -6,6 +6,20 @@ Copy `.env.example`, replace all public example secrets, then run `docker compos
 
 For Caddy, set a resolvable `APP_DOMAIN`, use `COOKIE_SECURE=true`, and start the `caddy` profile. For Tailscale Serve or another reverse proxy, forward to the frontend only and configure the exact external `APP_URL`.
 
+## Initial data collection
+
+On a new real-tailnet installation, TailView starts the read-only user and device synchronizations
+in the background as soon as the API is ready. The authenticated interface reports whether initial
+data is still being collected, ready, or needs administrator attention. This state comes from
+persisted synchronization history, so signing out, refreshing, or restarting an established
+installation does not reset it.
+
+The displayed wait estimate follows `INVENTORY_INTERVAL_SECONDS`, which defaults to five minutes
+and remains the scheduled fallback after the immediate first run. Most installations populate
+sooner; unusually large tailnets and upstream retries can take longer. Missing credentials and a
+failed first device synchronization stop the warm-up notice and direct the user to synchronization
+details instead of leaving the interface indefinitely waiting.
+
 ## GitHub Container Registry releases
 
 Pushing a signed `vMAJOR.MINOR.PATCH` tag runs the release workflow. It publishes the backend, frontend, and optional telemetry-agent images to `ghcr.io/crypt0rr` for `linux/amd64` and `linux/arm64`, attaches SBOM/provenance attestations, and creates a GitHub Release with a checksummed Compose bundle. Prerelease tags such as `v1.2.0-rc.1` do not update `latest`.

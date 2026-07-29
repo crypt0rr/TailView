@@ -64,6 +64,35 @@ test("setup or login reaches the demo dashboard and topology", async ({ page }) 
   await expect(page.getByRole("button", { name: "Permitted" })).toBeVisible();
 });
 
+test("initial collection notice links to synchronization and clears when ready", async ({ page }) => {
+  let initializationState: "collecting" | "ready" = "collecting";
+  await page.route("**/api/v1/capabilities", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.initialization = {
+      state: initializationState,
+      expected_wait_minutes: 5,
+      started_at: null,
+      detail: initializationState === "collecting"
+        ? "Initial tailnet data normally appears within 5 minutes."
+        : "Initial device synchronization completed successfully.",
+    };
+    await route.fulfill({ response, json: body });
+  });
+
+  await authenticate(page);
+  await expect(page.getByRole("status")).toContainText("Collecting initial tailnet data");
+  await page.getByRole("button", { name: "View synchronization" }).click();
+  await expect(page).toHaveURL(/\/sync$/);
+  await expect(page.getByRole("heading", { name: "Synchronization jobs" })).toBeVisible();
+
+  initializationState = "ready";
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Synchronization jobs" })).toBeVisible();
+  await expect(page.getByText("Collecting initial tailnet data")).not.toBeVisible();
+  await page.unrouteAll({ behavior: "ignoreErrors" });
+});
+
 test("demo reporting exposes trends, immutable evidence, and schedules", async ({ page }) => {
   await authenticate(page);
   await page.getByRole("button", { name: "Reports" }).click();

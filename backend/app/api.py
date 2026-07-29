@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -156,6 +157,7 @@ from .sync import (
     sync_tailnet_settings,
     sync_users,
     sync_webhooks,
+    tailscale_credentials_configured,
 )
 
 router = APIRouter(prefix="/api/v1")
@@ -3403,8 +3405,57 @@ async def audit(_: Authed, db: Db, limit: int = Query(100, ge=1, le=500)) -> dic
     }
 
 
+async def initialization_status(db: AsyncSession, settings: Settings) -> dict[str, Any]:
+    device_capability = await db.get(Capability, "device_inventory")
+    latest_device_job = await db.scalar(
+        select(SyncJob)
+        .where(SyncJob.kind == "devices")
+        .order_by(SyncJob.started_at.desc())
+        .limit(1)
+    )
+    expected_wait_minutes = max(1, math.ceil(settings.inventory_interval_seconds / 60))
+    latest_started_at = latest_device_job.started_at if latest_device_job else None
+    normalized_started_at = (
+        latest_started_at.replace(tzinfo=UTC)
+        if latest_started_at and latest_started_at.tzinfo is None
+        else latest_started_at
+    )
+    stale_running_job = bool(
+        latest_device_job
+        and latest_device_job.status == "running"
+        and normalized_started_at
+        and normalized_started_at
+        < datetime.now(UTC) - timedelta(minutes=expected_wait_minutes + 1)
+    )
+    if device_capability and device_capability.last_success is not None:
+        state = "ready"
+        detail = "Initial device synchronization completed successfully."
+    elif not await tailscale_credentials_configured(db, settings):
+        state = "attention"
+        detail = "Read-only Tailscale credentials are not configured."
+    elif (
+        latest_device_job
+        and latest_device_job.status in {"failed", "skipped", "cancelled"}
+    ) or stale_running_job:
+        state = "attention"
+        detail = "Initial device synchronization needs attention. Review synchronization jobs."
+    else:
+        state = "collecting"
+        detail = (
+            f"Initial tailnet data normally appears within {expected_wait_minutes} minutes. "
+            "Large tailnets or upstream retries can take longer."
+        )
+    return {
+        "state": state,
+        "expected_wait_minutes": expected_wait_minutes,
+        "started_at": latest_started_at,
+        "detail": detail,
+    }
+
+
 @router.get("/capabilities")
 async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
+    settings = get_settings()
     rows = (await db.execute(select(Capability).order_by(Capability.name))).scalars().all()
     capability_by_name = {row.name: row for row in rows}
     active_devices = (await db.scalars(select(Device).where(Device.active.is_(True)))).all()
@@ -3537,7 +3588,7 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
         for c in rows
     ]
     if "local_telemetry" not in capability_by_name:
-        configured = bool(get_settings().telemetry_secret)
+        configured = bool(settings.telemetry_secret)
         items.append(
             {
                 "name": "local_telemetry",
@@ -3580,6 +3631,7 @@ async def capabilities(_: Authed, db: Db) -> dict[str, Any]:
     return {
         "items": items,
         "navigation": navigation,
+        "initialization": await initialization_status(db, settings),
     }
 
 

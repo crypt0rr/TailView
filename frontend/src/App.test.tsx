@@ -3,7 +3,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
-import { navigationForRole, Shell, nav, partitionNavigation } from "./App";
+import {
+  InitializationNotice,
+  navigationForRole,
+  Shell,
+  nav,
+  partitionNavigation,
+} from "./App";
 import * as apiModule from "./api";
 import { api } from "./api";
 import {
@@ -20,6 +26,7 @@ import {
   dashboardPairFlowHref,
   dashboardMetricCards,
   keyExpiryState,
+  deviceEmptyDetail,
   trafficChartData,
   trafficTimeLabel,
   trafficVolumeLabel,
@@ -30,6 +37,75 @@ import type { AddressInventory, Device } from "./types";
 describe("TailView", () => {
   it("keeps the product name stable", () => {
     expect("TailView").toMatch(/TailView/);
+  });
+
+  it("shows collecting and attention states but hides completed initialization", () => {
+    const openSynchronization = vi.fn();
+    const { rerender } = render(
+      <InitializationNotice
+        initialization={{
+          state: "collecting",
+          expected_wait_minutes: 5,
+          started_at: null,
+          detail: "Initial tailnet data normally appears within 5 minutes.",
+        }}
+        onOpenSynchronization={openSynchronization}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Collecting initial tailnet data");
+    expect(screen.getByRole("status")).toHaveAttribute("aria-live", "polite");
+    fireEvent.click(screen.getByRole("button", { name: "View synchronization" }));
+    expect(openSynchronization).toHaveBeenCalledOnce();
+
+    rerender(
+      <InitializationNotice
+        initialization={{
+          state: "attention",
+          expected_wait_minutes: 5,
+          started_at: "2026-07-29T12:00:00Z",
+          detail: "Initial device synchronization needs attention.",
+        }}
+        onOpenSynchronization={openSynchronization}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Initial synchronization needs attention");
+
+    rerender(
+      <InitializationNotice
+        initialization={{
+          state: "ready",
+          expected_wait_minutes: 5,
+          started_at: "2026-07-29T12:00:00Z",
+          detail: "Initial device synchronization completed successfully.",
+        }}
+        onOpenSynchronization={openSynchronization}
+      />,
+    );
+    expect(screen.queryByText("Initial synchronization")).not.toBeInTheDocument();
+  });
+
+  it("distinguishes filtered, warming, failed, and successfully empty device inventories", () => {
+    expect(deviceEmptyDetail(undefined, true)).toBe(
+      "Adjust filters to see other synchronized devices.",
+    );
+    expect(deviceEmptyDetail({
+      state: "collecting",
+      expected_wait_minutes: 5,
+      started_at: null,
+      detail: "",
+    }, false)).toContain("still collecting");
+    expect(deviceEmptyDetail({
+      state: "attention",
+      expected_wait_minutes: 5,
+      started_at: null,
+      detail: "",
+    }, false)).toContain("needs attention");
+    expect(deviceEmptyDetail({
+      state: "ready",
+      expected_wait_minutes: 5,
+      started_at: null,
+      detail: "",
+    }, false)).toContain("completed successfully");
   });
 
   it("keeps administrator-only workspaces out of Viewer navigation", () => {

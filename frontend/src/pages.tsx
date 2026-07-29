@@ -95,6 +95,7 @@ import type {
   SavedViewRecord,
   GovernanceCredential,
   GovernanceSummary,
+  InitializationStatus,
   ObservedPhysicalEndpoint,
   Page,
   ServiceDetail,
@@ -904,7 +905,32 @@ function PostureBadge({ value }: { value: string }) {
   return <Badge tone={tone}>{value.replaceAll("_", " ")}</Badge>;
 }
 
-export function Devices({ role = "", user }: { role?: string; user: CurrentUser }) {
+export function deviceEmptyDetail(
+  initialization: InitializationStatus | undefined,
+  filtered: boolean,
+) {
+  if (filtered) return "Adjust filters to see other synchronized devices.";
+  if (initialization?.state === "collecting") {
+    return "Initial device synchronization is still collecting tailnet data.";
+  }
+  if (initialization?.state === "attention") {
+    return "Initial device synchronization needs attention. Review synchronization jobs.";
+  }
+  if (initialization?.state === "ready") {
+    return "Device synchronization completed successfully and returned no devices.";
+  }
+  return "Check device synchronization.";
+}
+
+export function Devices({
+  role = "",
+  user,
+  initialization,
+}: {
+  role?: string;
+  user: CurrentUser;
+  initialization?: InitializationStatus;
+}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedDevice = searchParams.get("device");
   const [search, setSearch] = useState(searchParams.get("search") ?? "");
@@ -1113,7 +1139,10 @@ export function Devices({ role = "", user }: { role?: string; user: CurrentUser 
       ) : !devices.length ? (
         <Empty
           title="No devices found"
-          detail="Adjust filters or check device synchronization."
+          detail={deviceEmptyDetail(
+            initialization,
+            Boolean(role || deviceHasExplicitState),
+          )}
         />
       ) : (
         <>

@@ -1,3 +1,10 @@
+export interface InitializationStatus {
+  state: "collecting" | "ready" | "attention";
+  expected_wait_minutes: number;
+  started_at: string | null;
+  detail: string;
+}
+
 export interface Device {
   id: string;
   name: string;
