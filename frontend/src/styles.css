@@ -943,8 +943,8 @@ aside nav .inactive-nav-item {
 }
 .content {
   padding: 28px;
-  max-width: 1600px;
-  margin: auto;
+  width: 100%;
+  box-sizing: border-box;
 }
 .initialization-notice {
   display: grid;
@@ -993,6 +993,7 @@ aside nav .inactive-nav-item {
   margin: 6px 0;
 }
 .page-head p {
+  max-width: 70ch;
   margin: 0;
   color: var(--muted);
   font-size: 13px;

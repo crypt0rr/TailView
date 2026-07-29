@@ -123,6 +123,78 @@ test("device workspaces expose metadata, table topology, history, and telemetry"
   await expect(page.getByText(/never a tailnet-wide live view/i)).toBeVisible();
 });
 
+test("device tables use the available ultrawide workspace", async ({ page }) => {
+  await page.setViewportSize({ width: 3440, height: 1440 });
+  await authenticate(page);
+  await page.getByRole("button", { name: "Devices", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Devices" })).toBeVisible();
+  await expect(page.locator(".table-card")).toBeVisible();
+
+  const layout = await page.locator(".workspace").evaluate((workspace) => {
+    const content = workspace.querySelector<HTMLElement>(".content");
+    const tableCard = workspace.querySelector<HTMLElement>(".table-card");
+    const tableScroll = workspace.querySelector<HTMLElement>(".table-scroll");
+    if (!content || !tableCard || !tableScroll) {
+      throw new Error("Device table layout was not rendered");
+    }
+    const workspaceRect = workspace.getBoundingClientRect();
+    const contentRect = content.getBoundingClientRect();
+    const tableRect = tableCard.getBoundingClientRect();
+    return {
+      workspaceWidth: workspaceRect.width,
+      contentWidth: contentRect.width,
+      tableWidth: tableRect.width,
+      rightGutter: workspaceRect.right - tableRect.right,
+      tableOverflow: getComputedStyle(tableScroll).overflowX,
+    };
+  });
+
+  expect(layout.workspaceWidth).toBeGreaterThan(3000);
+  expect(layout.contentWidth).toBeGreaterThan(3000);
+  expect(layout.tableWidth).toBeGreaterThan(2900);
+  expect(layout.rightGutter).toBeLessThan(40);
+  expect(layout.tableOverflow).toBe("auto");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(
+    () => page.locator(".workspace").evaluate((workspace) => workspace.getBoundingClientRect().left),
+  ).toBe(0);
+  const mobile = await page.locator(".workspace").evaluate((workspace) => {
+    const content = workspace.querySelector<HTMLElement>(".content");
+    const tableCard = workspace.querySelector<HTMLElement>(".table-card");
+    const tableScroll = workspace.querySelector<HTMLElement>(".table-scroll");
+    if (!content || !tableCard || !tableScroll) {
+      throw new Error("Mobile device table layout was not rendered");
+    }
+    const workspaceRect = workspace.getBoundingClientRect();
+    const contentRect = content.getBoundingClientRect();
+    const tableRect = tableCard.getBoundingClientRect();
+    return {
+      workspaceLeft: workspaceRect.left,
+      workspaceRight: workspaceRect.right,
+      contentLeft: contentRect.left,
+      contentRight: contentRect.right,
+      contentPaddingLeft: getComputedStyle(content).paddingLeft,
+      tableLeft: tableRect.left,
+      tableRight: tableRect.right,
+      tableClientWidth: tableScroll.clientWidth,
+      tableScrollWidth: tableScroll.scrollWidth,
+    };
+  });
+
+  expect(mobile.workspaceLeft).toBe(0);
+  expect(mobile.workspaceRight).toBe(390);
+  expect(mobile.contentLeft).toBe(0);
+  expect(mobile.contentRight).toBe(390);
+  expect(mobile.contentPaddingLeft).toBe("12px");
+  expect(mobile.tableLeft).toBe(12);
+  expect(mobile.tableRight).toBe(378);
+  expect(mobile.tableScrollWidth).toBeGreaterThan(mobile.tableClientWidth);
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  await expect(page.getByRole("button", { name: "Close navigation" })).toBeVisible();
+  await page.getByRole("button", { name: "Close navigation" }).click();
+});
+
 test("Administrator release-critical mutations remain functional", async ({ page }) => {
   await authenticate(page);
 
